@@ -24,8 +24,7 @@ CHAT_ID = os.environ["CHAT_ID"]
 PUBLISH_COUNT = 5
 CONCURRENCY = 10
 
-# Максимальная доля SOCKS5 среди публикуемых (в РФ работают нестабильно)
-SOCKS5_MAX_RATIO = 0.3  # 30%
+MAX_SOCKS5_RATIO = 0.4
 
 
 async def check_with_semaphore(sem, raw):
@@ -52,30 +51,21 @@ async def main():
     random.shuffle(raw_list)
 
     sem = asyncio.Semaphore(CONCURRENCY)
-    tasks = [check_with_semaphore(sem, r) for r in raw_list]
-    results = await asyncio.gather(*tasks)
-
+    results = await asyncio.gather(*[check_with_semaphore(sem, r) for r in raw_list])
     working = [r for r in results if r]
     logger.info(f"Рабочих прокси: {len(working)}")
 
-    # ─── ПРИОРИТИЗАЦИЯ ────────────────────────────────────────────────
-    # 1. Белые IP (любой протокол)
-    # 2. MTProto с fake TLS (ee)
-    # 3. WEB (dd)
-    # 4. SOCKS5
-    white = [p for p in working if p["is_white"]]
+    mtproto_white = [p for p in working if p["protocol"] == "MTPROTO" and p["is_white"]]
     mtproto = [p for p in working if p["protocol"] == "MTPROTO" and not p["is_white"]]
-    web = [p for p in working if p["protocol"] == "WEB" and not p["is_white"]]
-    socks5 = [p for p in working if p["protocol"] == "SOCKS5" and not p["is_white"]]
+    web = [p for p in working if p["protocol"] == "WEB"]
+    socks5 = [p for p in working if p["protocol"] == "SOCKS5"]
 
-    # Ограничиваем SOCKS5
-    max_socks5 = max(1, int(PUBLISH_COUNT * SOCKS5_MAX_RATIO))
+    max_socks5 = max(1, int(PUBLISH_COUNT * MAX_SOCKS5_RATIO))
     socks5 = socks5[:max_socks5]
 
-    # Собираем итоговый список
     seen = set()
     final = []
-    for p in white + mtproto + web + socks5:
+    for p in mtproto_white + mtproto + web + socks5:
         key = (p["ip"], p["port"])
         if key in seen:
             continue
