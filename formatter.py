@@ -1,7 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ─── ЭМОДЗИ ПРОТОКОЛОВ ─────────────────────────────────────────────────
-
 PROTO_ICON = {
     "MTPROTO": "🔐",
     "SOCKS5": "🧦",
@@ -14,8 +12,6 @@ PROTO_LABEL = {
     "WEB": "WEB (TgWebProxy)",
 }
 
-
-# ─── ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ ────────────────────────────────────────────
 
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
@@ -30,8 +26,6 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
-# ─── ТЕКСТ СООБЩЕНИЯ ───────────────────────────────────────────────────
-
 def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
@@ -44,7 +38,10 @@ def format_message(p: dict) -> str:
     icon = PROTO_ICON.get(proto, "🔗")
     label = PROTO_LABEL.get(proto, proto)
 
-    # ── Шапка ──
+    # Пометка fake TLS для MTProto
+    if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
+        label += " · 🛡 Fake TLS"
+
     header = ""
     if white:
         header = (
@@ -53,7 +50,6 @@ def format_message(p: dict) -> str:
             "⭐️ Приоритетная публикация\n\n"
         )
 
-    # ── Статус белого IP ──
     if white:
         white_line = "├ ✅ <b>Белый IP:</b> Да · подтверждён\n"
         if p.get("white_ips"):
@@ -61,10 +57,8 @@ def format_message(p: dict) -> str:
     else:
         white_line = "├ ⚪️ <b>Белый IP:</b> Нет\n"
 
-    # ── Подпись IP/домена ──
     ip_label = "🌐 Домен" if proto == "WEB" else "📍 IP"
 
-    # ── Тело сообщения ──
     body = (
         f"{flag} <b>{country}</b> · <code>#{p['id']}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -80,8 +74,6 @@ def format_message(p: dict) -> str:
 
     return f"{header}{body}"
 
-
-# ─── КЛАВИАТУРА ────────────────────────────────────────────────────────
 
 def build_keyboard(p: dict):
     proto = p["protocol"].upper()
