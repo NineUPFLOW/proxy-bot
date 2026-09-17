@@ -3,19 +3,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ (без HTTP) ─────────────────────────────────────────────
+# ─── ИСТОЧНИКИ ─────────────────────────────────────────────────────────
 
-# MTProto: SoliSpirit — обновляется каждые 12 часов, авто-проверка
+# MTProto: SoliSpirit — обновляется каждые 12 часов
 MTPROTO_URLS = [
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
     "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
 ]
 
-# SOCKS5: обновляется ежечасно с авто-проверкой
+# SOCKS5
 SOCKS5_URL = "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
 SOCKS5_FALLBACK = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
 
-# WEB-прокси: агрегатор mtpro.xyz
+# WEB-прокси
 WEB_PROXY_URL = "https://mtpro.xyz/api/?type=webproxy"
 
 
@@ -45,7 +45,7 @@ async def _get_json(session, url):
 # ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
 
 def _parse_tg_link(line: str):
-    """Парсит строку вида tg://proxy?server=...&port=...&secret=..."""
+    """Парсит tg://proxy ссылку. Оставляет только fake TLS (ee) и WEB (dd)."""
     if "tg://proxy?" not in line and "t.me/proxy?" not in line:
         return None
     try:
@@ -57,7 +57,12 @@ def _parse_tg_link(line: str):
         if not all([server, port, secret]):
             return None
 
-        # Определяем тип по secret: dd = WEB, ee = MTProto
+        # ── ФИЛЬТР: только fake TLS (ee) и WEB (dd) ──
+        # dd = random padding (не маскирует трафик под HTTPS)
+        # ee = fake TLS (маскирует под HTTPS — лучший вариант для РФ)
+        if not (secret.startswith("ee") or secret.startswith("dd")):
+            return None
+
         proto = "WEB" if secret.startswith("dd") else "MTPROTO"
         return {
             "protocol": proto,
@@ -82,10 +87,7 @@ def _parse_socks5_line(line: str):
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def fetch_all_proxies() -> list:
-    """
-    Собирает прокси MTProto, WEB и SOCKS5.
-    Возвращает список словарей: protocol, ip, port [, secret].
-    """
+    """Собирает MTProto (fake TLS), WEB и SOCKS5."""
     result = []
     seen = set()
 
@@ -96,7 +98,7 @@ async def fetch_all_proxies() -> list:
             result.append(p)
 
     async with aiohttp.ClientSession() as s:
-        # ── MTProto / WEB (из tg:// ссылок) ──
+        # MTProto / WEB
         for url in MTPROTO_URLS:
             lines = await _get_text(s, url)
             for line in lines:
@@ -105,7 +107,7 @@ async def fetch_all_proxies() -> list:
                     add(p)
             logger.info(f"{url.split('/')[-2]}: загружено {len(lines)} строк")
 
-        # ── WEB-прокси из mtpro.xyz ──
+        # WEB из mtpro.xyz
         web_data = await _get_json(s, WEB_PROXY_URL)
         if web_data:
             items = web_data if isinstance(web_data, list) else web_data.get("proxies", [])
@@ -119,14 +121,13 @@ async def fetch_all_proxies() -> list:
                     })
             logger.info(f"mtpro.xyz webproxy: {len(items)} записей")
 
-        # ── SOCKS5 ──
+        # SOCKS5
         lines = await _get_text(s, SOCKS5_URL)
         for line in lines:
             p = _parse_socks5_line(line)
             if p:
                 add(p)
 
-    # Если SOCKS5 мало — добираем из резервного источника
     if len([p for p in result if p["protocol"] == "SOCKS5"]) < 50:
         async with aiohttp.ClientSession() as s:
             for line in await _get_text(s, SOCKS5_FALLBACK):
