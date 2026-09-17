@@ -4,6 +4,7 @@ import os
 import random
 
 from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from sources import fetch_all_proxies
@@ -33,7 +34,10 @@ async def check_with_semaphore(sem, raw):
 
 
 async def main():
-    bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
     raw_list = await fetch_all_proxies()
     if not raw_list:
