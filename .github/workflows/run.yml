@@ -2,9 +2,8 @@ name: Proxy Bot
 
 on:
   schedule:
-    # Каждые 15 минут (UTC). GitHub может запускать с задержкой.
     - cron: '*/15 * * * *'
-  workflow_dispatch:   # позволяет запустить вручную из вкладки Actions
+  workflow_dispatch:
 
 jobs:
   run:
@@ -13,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
