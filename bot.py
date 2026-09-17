@@ -21,7 +21,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 PUBLISH_COUNT = 3      # сколько прокси публиковать за один запуск
-CONCURRENCY = 20       # сколько прокси проверять параллельно
+CONCURRENCY = 10       # сколько прокси проверять параллельно
 
 
 async def check_with_semaphore(sem, raw):
