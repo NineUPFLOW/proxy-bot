@@ -1,5 +1,4 @@
 import asyncio
-import ipaddress
 import logging
 import socket
 import os
@@ -22,7 +21,8 @@ API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-TEST_URL_SOCKS = "https://ya.ru"
+# URL для проверки, работает ли прокси с российскими ресурсами
+TEST_URL_RU = "https://ya.ru"
 
 
 def _silence_telethon_futures(loop, context):
@@ -30,15 +30,6 @@ def _silence_telethon_futures(loop, context):
     if "Future exception was never retrieved" in msg:
         return
     loop.default_exception_handler(context)
-
-
-def is_white_ip(ip: str) -> bool:
-    try:
-        addr = ipaddress.ip_address(ip.split(":")[0])
-        return not (addr.is_private or addr.is_loopback
-                    or addr.is_reserved or addr.is_multicast)
-    except ValueError:
-        return False
 
 
 async def geolocate(ip: str) -> dict:
@@ -66,6 +57,7 @@ def country_flag(code: str) -> str:
 
 
 async def check_telegram_proxy(host: str, port: int, secret: str):
+    """Проверяет MTProto/WEB через реальный handshake Telethon."""
     try:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_silence_telethon_futures)
@@ -110,6 +102,7 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
 
 
 async def check_socks5(host: str, port: int):
+    """Проверяет SOCKS5 запросом к ya.ru — это реальный тест работы в РФ."""
     try:
         connector = ProxyConnector(
             proxy_type=ProxyType.SOCKS5,
@@ -118,7 +111,7 @@ async def check_socks5(host: str, port: int):
         t0 = asyncio.get_event_loop().time()
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
-                TEST_URL_SOCKS, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT)
+                TEST_URL_RU, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT)
             ) as resp:
                 if resp.status in (200, 301, 302):
                     ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
@@ -143,8 +136,9 @@ async def process_proxy(raw: dict):
     if ping is None:
         return None
 
+    # Резолвим домен для геолокации
     lookup_ip = ip
-    if proto == "WEB" and not is_white_ip(ip):
+    if proto in ("WEB",) and not _is_ip(ip):
         try:
             lookup_ip = socket.gethostbyname(ip)
         except Exception:
@@ -154,8 +148,6 @@ async def process_proxy(raw: dict):
     if not geo:
         return None
 
-    white = is_white_ip(lookup_ip) and proto != "WEB"
-
     raw.update({
         "ping": f"{ping} ms",
         "country": geo.get("country", "Unknown"),
@@ -163,7 +155,15 @@ async def process_proxy(raw: dict):
         "city": geo.get("city", "Unknown"),
         "provider": geo.get("isp", "Unknown"),
         "flag": country_flag(geo.get("countryCode", "")),
-        "is_white": white,
         "id": abs(hash(f"{ip}:{port}")) % 10_000_000,
     })
     return raw
+
+
+def _is_ip(s: str) -> bool:
+    """Проверяет, является ли строка IP-адресом."""
+    try:
+        socket.inet_aton(s)
+        return True
+    except OSError:
+        return False
