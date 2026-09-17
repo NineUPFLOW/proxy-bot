@@ -1,8 +1,15 @@
+"""
+Точка входа. Запускает полный цикл:
+1. Сбор прокси из источников
+2. Фильтрация уже просканированных
+3. Проверка новых
+4. Фильтрация уже опубликованных
+5. Публикация лучших
+"""
 import asyncio
 import logging
 import os
 import random
-
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -12,10 +19,11 @@ from aiogram.types import LinkPreviewOptions
 from sources import fetch_all_proxies
 from checker import process_proxy, close_http_session
 from formatter import format_message, build_keyboard
+import state
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -25,10 +33,9 @@ CHAT_ID = os.environ["CHAT_ID"]
 PUBLISH_COUNT = 5
 CONCURRENCY = 10
 MAX_SOCKS5_RATIO = 0.4
-MAX_WEB_COUNT = 2  # не более 2 WEB-прокси за раз (нестабильны)
-
-SEND_DELAY = 3          # пауза между отправками сообщений
-MAX_SEND_RETRIES = 3    # сколько раз повторять отправку при flood-control 
+MAX_WEB_COUNT = 2
+SEND_DELAY = 3
+MAX_SEND_RETRIES = 3
 
 
 async def check_with_semaphore(sem, raw):
@@ -36,12 +43,11 @@ async def check_with_semaphore(sem, raw):
         try:
             return await process_proxy(raw)
         except Exception as e:
-            logger.debug(f"check error: {e}")
+            logger.debug("check error: %s", e)
             return None
 
 
 async def send_with_retry(bot: Bot, p: dict) -> bool:
-    """Отправляет сообщение с прокси, учитывая flood-control Telegram."""
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
             await bot.send_message(
@@ -50,85 +56,105 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
                 reply_markup=build_keyboard(p),
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
-            logger.info(f"Опубликован {p['protocol']} #{p['id']}")
+            logger.info("Опубликован %s #%s", p["protocol"], p["id"])
             return True
         except TelegramRetryAfter as e:
-            logger.warning(
-                f"Flood control, ждём {e.retry_after}s (попытка {attempt}/{MAX_SEND_RETRIES})"
-            )
+            logger.warning("Flood control, ждём %ss (попытка %s/%s)",
+                           e.retry_after, attempt, MAX_SEND_RETRIES)
             await asyncio.sleep(e.retry_after + 1)
         except TelegramAPIError as e:
-            logger.error(f"Ошибка публикации {p['protocol']} #{p.get('id')}: {e}")
+            logger.error("Ошибка публикации %s #%s: %s",
+                         p["protocol"], p.get("id"), e)
             return False
         except Exception as e:
-            logger.error(f"Неожиданная ошибка публикации: {e}")
+            logger.error("Неожиданная ошибка публикации: %s", e)
             return False
-    logger.error(f"Не удалось отправить {p['protocol']} #{p.get('id')} после {MAX_SEND_RETRIES} попыток")
+    logger.error("Не удалось отправить %s #%s после %s попыток",
+                 p["protocol"], p.get("id"), MAX_SEND_RETRIES)
     return False
 
 
 async def run(bot: Bot):
+    # 0. Инициализация состояния
+    state.init_db()
+    state.cleanup()
+
+    # 1. Сбор
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
         return
 
-    random.shuffle(raw_list)
+    # 2. Дедупликация внутри батча
+    seen_in_batch = set()
+    unique_raw = []
+    for r in raw_list:
+        key = f"{r.get('ip')}:{r.get('port')}:{r.get('protocol')}"
+        if key not in seen_in_batch:
+            seen_in_batch.add(key)
+            unique_raw.append(r)
+    logger.info("Собрано: %s, уникальных: %s", len(raw_list), len(unique_raw))
 
+    # 3. Фильтрация уже просканированных
+    fresh_raw = state.filter_unseen(unique_raw)
+    logger.info("Новых для сканирования: %s (пропущено: %s)",
+                len(fresh_raw), len(unique_raw) - len(fresh_raw))
+
+    if not fresh_raw:
+        logger.info("Нет новых прокси для проверки")
+        return
+
+    # 4. Проверка
+    random.shuffle(fresh_raw)
     sem = asyncio.Semaphore(CONCURRENCY)
-    results = await asyncio.gather(*[check_with_semaphore(sem, r) for r in raw_list])
+    results = await asyncio.gather(
+        *[check_with_semaphore(sem, r) for r in fresh_raw]
+    )
+
     working = [r for r in results if r]
-
-    # ── Статистика по протоколам ──
-    by_proto = {}
     for p in working:
-        by_proto[p["protocol"]] = by_proto.get(p["protocol"], 0) + 1
-    logger.info(f"Рабочих прокси: {len(working)} | по протоколам: {by_proto}")
+        state.mark_seen(p)
+    logger.info("Рабочих прокси: %s", len(working))
 
-    # ── Разделение по типам ──
+    # 5. Фильтрация уже опубликованных
+    working = state.filter_unpublished(working)
+    logger.info("Неопубликованных: %s", len(working))
+
+    if not working:
+        logger.info("Все рабочие прокси уже публиковались")
+        return
+
+    # 6. Разделение по типам
     mtproto = [p for p in working if p["protocol"] == "MTPROTO"]
     web = [p for p in working if p["protocol"] == "WEB"]
     socks5 = [p for p in working if p["protocol"] == "SOCKS5"]
 
-    # Ограничиваем WEB и SOCKS5
     web = web[:MAX_WEB_COUNT]
     max_socks5 = max(1, int(PUBLISH_COUNT * MAX_SOCKS5_RATIO))
     socks5 = socks5[:max_socks5]
 
-    seen = set()
-    final = []
-    for p in mtproto + web + socks5:
-        key = (p["ip"], p["port"])
-        if key in seen:
-            continue
-        seen.add(key)
-        final.append(p)
-        if len(final) >= PUBLISH_COUNT:
-            break
+    # 7. Формирование выборки с приоритетом MTProto
+    selected = []
+    selected.extend(mtproto[:PUBLISH_COUNT])
+    remaining = PUBLISH_COUNT - len(selected)
 
-    if not final:
-        logger.warning("Нет рабочих прокси для публикации")
+    if remaining > 0:
+        pool = socks5 + web
+        random.shuffle(pool)
+        selected.extend(pool[:remaining])
+
+    if not selected:
+        logger.info("Нет прокси для публикации")
         return
 
-    for p in final:
-        await send_with_retry(bot, p)
+    # 8. Публикация
+    logger.info("Публикуем %s прокси", len(selected))
+    for p in selected:
+        ok = await send_with_retry(bot, p)
+        if ok:
+            state.mark_published(p)
         await asyncio.sleep(SEND_DELAY)
 
-
-async def main():
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    try:
-        await run(bot)
-    except Exception:
-        logger.exception("Необработанная ошибка в основном цикле")
-    finally:
-        # Гарантированно закрываем HTTP-сессии, даже если run() упал с исключением
-        await bot.session.close()
-        await close_http_session()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    # 9. Закрытие ресурсов
+    await close_http_session()
+    logger.info("Цикл завершён")
