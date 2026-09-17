@@ -24,7 +24,7 @@ CHAT_ID = os.environ["CHAT_ID"]
 PUBLISH_COUNT = 5
 CONCURRENCY = 10
 
-MAX_SOCKS5_RATIO = 0.4
+MAX_SOCKS5_RATIO = 0.4  # не более 40% SOCKS5 (он часто блокируется в РФ)
 
 
 async def check_with_semaphore(sem, raw):
@@ -55,8 +55,8 @@ async def main():
     working = [r for r in results if r]
     logger.info(f"Рабочих прокси: {len(working)}")
 
-    mtproto_white = [p for p in working if p["protocol"] == "MTPROTO" and p["is_white"]]
-    mtproto = [p for p in working if p["protocol"] == "MTPROTO" and not p["is_white"]]
+    # Приоритет: MTProto → WEB → SOCKS5 (ограниченно)
+    mtproto = [p for p in working if p["protocol"] == "MTPROTO"]
     web = [p for p in working if p["protocol"] == "WEB"]
     socks5 = [p for p in working if p["protocol"] == "SOCKS5"]
 
@@ -65,7 +65,7 @@ async def main():
 
     seen = set()
     final = []
-    for p in mtproto_white + mtproto + web + socks5:
+    for p in mtproto + web + socks5:
         key = (p["ip"], p["port"])
         if key in seen:
             continue
