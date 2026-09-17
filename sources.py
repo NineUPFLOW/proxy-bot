@@ -1,13 +1,18 @@
-import logging
-from collections import Counter
-from urllib.parse import urlparse, parse_qs
-
 import aiohttp
+import logging
+from urllib.parse import urlparse, parse_qs
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ (с добавлением RU-сегмента) ───────────────────────────────
+# Некоторые источники (например mtpro.xyz) режут запросы без человеческого UA
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 proxy-bot/1.0"
+    )
+}
 
+# ─── ИСТОЧНИКИ (с добавлением RU-сегмента) ───────────────────────────────
 # MTProto: SoliSpirit — обновляется каждые 12 часов, авто-проверка
 MTPROTO_URLS = [
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
@@ -32,11 +37,11 @@ LONEKING_MT_URL = "https://raw.githubusercontent.com/LoneKingCode/free-proxy-db/
 # ─── ЗАГРУЗЧИКИ ─────────────────────────────────────────────────────────
 async def _get_text(session, url):
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as r:
             if r.status == 200:
                 text = await r.text()
                 return [l.strip() for l in text.splitlines() if l.strip()]
-            logger.warning(f"{url}: HTTP {r.status}")
+            logger.warning(f"Text fetch {url}: HTTP {r.status}")
     except Exception as e:
         logger.warning(f"Text fetch failed {url}: {e}")
     return []
@@ -44,10 +49,10 @@ async def _get_text(session, url):
 
 async def _get_json(session, url):
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as r:
             if r.status == 200:
-                return await r.json()
-            logger.warning(f"{url}: HTTP {r.status}")
+                return await r.json(content_type=None)
+            logger.warning(f"JSON fetch {url}: HTTP {r.status}")
     except Exception as e:
         logger.warning(f"JSON fetch failed {url}: {e}")
     return []
@@ -55,24 +60,27 @@ async def _get_json(session, url):
 
 # ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
 def _parse_tg_link(line: str):
-    """
-    Парсит tg://proxy ссылку. Оставляет только Fake TLS (ee) и WEB (dd).
-    Используем urlparse/parse_qs вместо ручного split("="), чтобы
-    параметры корректно URL-декодировались (раньше secret/server могли
-    прийти в "сыром" percent-encoded виде и ломать прокси).
+    """Парсит tg://proxy ссылку. Оставляет только Fake TLS (ee) и WEB (dd).
+
+    Используем urllib.parse вместо ручного split("&")/split("=") —
+    надёжнее обрабатывает URL-кодированные значения и отсутствующие/
+    задвоенные параметры.
     """
     if "tg://proxy?" not in line and "t.me/proxy?" not in line:
         return None
     try:
-        query = urlparse(line).query
+        query = line.split("?", 1)[1]
         params = parse_qs(query)
+
         server = params.get("server", [None])[0]
         port = params.get("port", [None])[0]
         secret = params.get("secret", [None])[0]
+
         if not all([server, port, secret]):
             return None
         if not (secret.startswith("ee") or secret.startswith("dd")):
             return None
+
         proto = "WEB" if secret.startswith("dd") else "MTPROTO"
         return {
             "protocol": proto,
@@ -86,24 +94,9 @@ def _parse_tg_link(line: str):
 
 
 def _parse_socks5_line(line: str):
-    """
-    Парсит 'ip:port' и 'user:pass@ip:port'.
-    Раньше поддерживался только 'ip:port' — строка вида
-    'user:pass@1.2.3.4:1080' ломала парсер (rsplit по ':' отдавал
-    кусок 'user:pass@1.2.3.4' как "ip").
-    """
-    line = line.strip()
-    if not line:
+    if ":" not in line:
         return None
-
-    hostport = line.rpartition("@")[2] if "@" in line else line
-    if ":" not in hostport:
-        return None
-
-    ip, _, port = hostport.rpartition(":")
-    if not ip or not port:
-        return None
-
+    ip, port = line.rsplit(":", 1)
     try:
         return {"protocol": "SOCKS5", "ip": ip.strip(),
                 "port": int(port.strip()), "raw": line}
@@ -128,7 +121,6 @@ def _parse_loneking_json(item: dict):
             }
     except Exception:
         return None
-    return None
 
 
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
@@ -199,6 +191,7 @@ async def fetch_all_proxies() -> list:
                 if p:
                     add(p)
 
+    from collections import Counter
     stats = Counter(p["protocol"] for p in result)
     logger.info(f"Итого: {dict(stats)}")
     return result
