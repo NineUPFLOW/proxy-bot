@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import logging
 import socket
 import os
@@ -25,11 +26,24 @@ TG_SESSION = os.environ.get("TG_SESSION")
 TEST_URL_RU = "https://ya.ru"
 
 
+# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ──────────────────────────────────────────
+
 def _silence_telethon_futures(loop, context):
     msg = context.get("message", "")
     if "Future exception was never retrieved" in msg:
         return
     loop.default_exception_handler(context)
+
+
+# ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
+
+def _is_ip(s: str) -> bool:
+    """Проверяет, является ли строка IP-адресом (IPv4 или IPv6)."""
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
 
 
 async def geolocate(ip: str) -> dict:
@@ -55,6 +69,8 @@ def country_flag(code: str) -> str:
     return (chr(0x1F1E6 + ord(code[0].upper()) - 65)
             + chr(0x1F1E6 + ord(code[1].upper()) - 65))
 
+
+# ─── ПРОВЕРКА MTProto / WEB ────────────────────────────────────────────
 
 async def check_telegram_proxy(host: str, port: int, secret: str):
     """Проверяет MTProto/WEB через реальный handshake Telethon."""
@@ -101,6 +117,8 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
     return None
 
 
+# ─── ПРОВЕРКА SOCKS5 (через ya.ru) ────────────────────────────────────
+
 async def check_socks5(host: str, port: int):
     """Проверяет SOCKS5 запросом к ya.ru — это реальный тест работы в РФ."""
     try:
@@ -121,6 +139,8 @@ async def check_socks5(host: str, port: int):
     return None
 
 
+# ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
+
 async def process_proxy(raw: dict):
     proto = raw["protocol"].upper()
     ip = raw["ip"]
@@ -138,7 +158,7 @@ async def process_proxy(raw: dict):
 
     # Резолвим домен для геолокации
     lookup_ip = ip
-    if proto in ("WEB",) and not _is_ip(ip):
+    if proto == "WEB" and not _is_ip(ip):
         try:
             lookup_ip = socket.gethostbyname(ip)
         except Exception:
@@ -158,12 +178,3 @@ async def process_proxy(raw: dict):
         "id": abs(hash(f"{ip}:{port}")) % 10_000_000,
     })
     return raw
-
-
-def _is_ip(s: str) -> bool:
-    """Проверяет, является ли строка IP-адресом."""
-    try:
-        socket.inet_aton(s)
-        return True
-    except OSError:
-        return False
