@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# ─── ИКОНКИ И НАЗВАНИЯ ПРОТОКОЛОВ ──────────────────────────────────────
+
 PROTO_ICON = {
     "MTPROTO": "🔐",
     "SOCKS5": "🧦",
@@ -12,6 +14,8 @@ PROTO_LABEL = {
     "WEB": "WEB (TgWebProxy)",
 }
 
+
+# ─── ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ ────────────────────────────────────────────
 
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
@@ -26,6 +30,23 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
+# ─── ЗАГОЛОВОК СООБЩЕНИЯ ───────────────────────────────────────────────
+
+def _build_label(p: dict) -> str:
+    """Формирует название протокола с пометками."""
+    proto = p["protocol"].upper()
+    label = PROTO_LABEL.get(proto, proto)
+
+    if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
+        label += " · 🛡 Fake TLS"
+    if proto == "WEB":
+        label += " · ⚠️ нестабильный"
+
+    return label
+
+
+# ─── ТЕКСТ СООБЩЕНИЯ ───────────────────────────────────────────────────
+
 def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
@@ -35,18 +56,15 @@ def format_message(p: dict) -> str:
     ping = p.get("ping", "N/A")
 
     icon = PROTO_ICON.get(proto, "🔗")
-    label = PROTO_LABEL.get(proto, proto)
-
-    if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
-        label += " · 🛡 Fake TLS"
+    label = _build_label(p)
 
     ip_label = "🌐 Домен" if proto == "WEB" else "📍 IP"
 
     body = (
-        f"{flag} <b>{country}</b> · <code>#{p['id']}</code>\n"
+        f"{flag} <b>{country}</b>  ·  <code>#{p['id']}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n"
-        f"┌ {icon} <b>Протокол:</b> {label}\n"
+        f"┌ {icon} <b>{label}</b>\n"
         f"├ 🌐 <b>Пинг:</b> <code>{ping}</code>\n"
         f"├ 🏳️ <b>Страна:</b> {flag} {country}\n"
         f"├ 🏙 <b>Город:</b> {city}\n"
@@ -54,12 +72,20 @@ def format_message(p: dict) -> str:
         f"└ {ip_label}: <code>{p['ip']}</code>\n"
     )
 
-    # Для SOCKS5 — честная пометка, что проверен через ya.ru
+    # Подвал с пометками
+    footer_parts = []
     if proto == "SOCKS5":
-        body += "\n✅ Проверен на доступ к ya.ru"
+        footer_parts.append("✅ Проверен на доступ к ya.ru")
+    if proto == "WEB":
+        footer_parts.append("⚠️ WEB-прокси работают нестабильно")
+
+    if footer_parts:
+        body += "\n" + "\n".join(footer_parts)
 
     return body
 
+
+# ─── КЛАВИАТУРА ────────────────────────────────────────────────────────
 
 def build_keyboard(p: dict):
     proto = p["protocol"].upper()
