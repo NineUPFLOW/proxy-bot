@@ -21,8 +21,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-PUBLISH_COUNT = 5      # сколько прокси публиковать за один запуск
-CONCURRENCY = 10       # сколько прокси проверять параллельно
+PUBLISH_COUNT = 5
+CONCURRENCY = 10
+
+# Максимальная доля SOCKS5 среди публикуемых (в РФ работают нестабильно)
+SOCKS5_MAX_RATIO = 0.3  # 30%
 
 
 async def check_with_semaphore(sem, raw):
@@ -55,14 +58,24 @@ async def main():
     working = [r for r in results if r]
     logger.info(f"Рабочих прокси: {len(working)}")
 
-    # Приоритет: сначала белые IP
+    # ─── ПРИОРИТИЗАЦИЯ ────────────────────────────────────────────────
+    # 1. Белые IP (любой протокол)
+    # 2. MTProto с fake TLS (ee)
+    # 3. WEB (dd)
+    # 4. SOCKS5
     white = [p for p in working if p["is_white"]]
-    normal = [p for p in working if not p["is_white"]]
+    mtproto = [p for p in working if p["protocol"] == "MTPROTO" and not p["is_white"]]
+    web = [p for p in working if p["protocol"] == "WEB" and not p["is_white"]]
+    socks5 = [p for p in working if p["protocol"] == "SOCKS5" and not p["is_white"]]
 
-    # Убираем дубликаты
+    # Ограничиваем SOCKS5
+    max_socks5 = max(1, int(PUBLISH_COUNT * SOCKS5_MAX_RATIO))
+    socks5 = socks5[:max_socks5]
+
+    # Собираем итоговый список
     seen = set()
     final = []
-    for p in white + normal:
+    for p in white + mtproto + web + socks5:
         key = (p["ip"], p["port"])
         if key in seen:
             continue
