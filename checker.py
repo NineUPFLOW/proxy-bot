@@ -10,24 +10,29 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
+# ─── ГЛУШИМ ЛОГИ TELETHON ──────────────────────────────────────────────
 for name in ("telethon", "telethon.network", "telethon.client",
              "telethon.network.mtprotosender", "telethon.network.connection"):
     logging.getLogger(name).setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
-MAX_PING_MS = 5000
-MAX_PING_WEB_MS = 3000  # Для WEB чуть строже
+# ─── ЛИМИТЫ ────────────────────────────────────────────────────────────
+MAX_PING_MS = 5000          # для MTProto и SOCKS5
+MAX_PING_WEB_MS = 3000      # для WEB — строже
 CHECK_TIMEOUT = 6
 WEB_CHECK_TIMEOUT = 8
+
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-# URL для проверки SOCKS5 (строгая проверка)
+# URL для строгой проверки SOCKS5
 TEST_URL_TG = "https://api.telegram.org"
 TEST_URL_RU = "https://ya.ru"
 
+
+# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ASYNCIO ──────────────────────────────────
 
 def _silence_telethon_futures(loop, context):
     msg = context.get("message", "")
@@ -36,7 +41,10 @@ def _silence_telethon_futures(loop, context):
     loop.default_exception_handler(context)
 
 
+# ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
+
 def _is_ip(s: str) -> bool:
+    """Проверяет, является ли строка IP-адресом (IPv4 или IPv6)."""
     try:
         ipaddress.ip_address(s)
         return True
@@ -45,6 +53,7 @@ def _is_ip(s: str) -> bool:
 
 
 async def geolocate(ip: str) -> dict:
+    """Геолокация через ip-api.com."""
     async with aiohttp.ClientSession() as s:
         try:
             async with s.get(
@@ -62,15 +71,17 @@ async def geolocate(ip: str) -> dict:
 
 
 def country_flag(code: str) -> str:
+    """'DE' -> '🇩🇪'"""
     if not code or len(code) != 2:
         return "🏳️"
     return (chr(0x1F1E6 + ord(code[0].upper()) - 65)
             + chr(0x1F1E6 + ord(code[1].upper()) - 65))
 
 
-# ─── MTProto / WEB ─────────────────────────────────────────────────────
+# ─── MTProto / WEB (через Telethon) ────────────────────────────────────
 
 async def _one_mtproto_handshake(host, port, secret, timeout):
+    """Одна попытка handshake. Возвращает пинг в мс или None."""
     try:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_silence_telethon_futures)
@@ -115,31 +126,36 @@ async def _one_mtproto_handshake(host, port, secret, timeout):
 
 
 async def check_telegram_proxy(host: str, port: int, secret: str, is_web: bool = False):
+    """
+    Проверка MTProto/WEB через реальный handshake Telethon.
+
+    Для MTProto — 3 последовательные попытки. Если хотя бы одна провалилась,
+    прокси считается нестабильным и отсеивается.
+    Для WEB — 2 попытки (WEB и так нестабильны, слишком строго не нужно).
+    """
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
+    attempts = 2 if is_web else 3
 
-    ping1 = await _one_mtproto_handshake(host, port, secret, timeout)
-    if ping1 is None:
-        return None
+    pings = []
+    for i in range(attempts):
+        ping = await _one_mtproto_handshake(host, port, secret, timeout)
+        if ping is None:
+            return None
+        pings.append(ping)
+        if i < attempts - 1:
+            await asyncio.sleep(0.5)
 
-    if not is_web:
-        return ping1 if ping1 < MAX_PING_MS else None
+    avg_ping = sum(pings) / len(pings)
 
-    # WEB: двойная проверка
-    await asyncio.sleep(1)
-    ping2 = await _one_mtproto_handshake(host, port, secret, timeout)
-    if ping2 is None:
-        return None
-
-    avg_ping = (ping1 + ping2) / 2
-    if avg_ping > MAX_PING_WEB_MS:
-        return None
-
-    return int(avg_ping)
+    if is_web:
+        return int(avg_ping) if avg_ping < MAX_PING_WEB_MS else None
+    return int(avg_ping) if avg_ping < MAX_PING_MS else None
 
 
-# ─── SOCKS5 (СТРОГАЯ ПРОВЕРКА) ─────────────────────────────────────────
+# ─── SOCKS5 (СТРОГАЯ ПРОВЕРКА: Telegram + ya.ru) ───────────────────────
 
 async def _socks5_get(connector, url: str, timeout: float):
+    """Один GET-запрос через SOCKS5. Возвращает HTTP-статус или None."""
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
@@ -156,7 +172,9 @@ async def check_socks5(host: str, port: int):
     Строгая проверка SOCKS5:
       - обязательный доступ к api.telegram.org
       - обязательный доступ к ya.ru
+
     Публикуем только если пройдены ОБА теста.
+    Возвращает пинг (мс) или None.
     """
     try:
         connector = ProxyConnector(
@@ -184,25 +202,38 @@ async def check_socks5(host: str, port: int):
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def process_proxy(raw: dict):
+    """
+    Полный цикл проверки одного прокси:
+      1) Проверка работоспособности (по протоколу)
+      2) Геолокация
+      3) Обогащение данными (ping, страна, город, провайдер)
+
+    Возвращает обогащённый словарь или None, если прокси не работает.
+    """
     proto = raw["protocol"].upper()
     ip = raw["ip"]
     port = raw["port"]
 
+    # ─── 1. Проверка по протоколу ───
     if proto == "MTPROTO":
-        # Проверяем, что секрет начинается с 'ee' (Fake TLS)
+        # Оставляем только Fake TLS (secret начинается с 'ee')
         if not raw.get("secret", "").startswith("ee"):
             return None
         ping = await check_telegram_proxy(ip, port, raw["secret"], is_web=False)
+
     elif proto == "WEB":
         ping = await check_telegram_proxy(ip, port, raw["secret"], is_web=True)
+
     elif proto == "SOCKS5":
         ping = await check_socks5(ip, port)
+
     else:
         return None
 
     if ping is None:
         return None
 
+    # ─── 2. Резолв домена для WEB ───
     lookup_ip = ip
     if proto == "WEB" and not _is_ip(ip):
         try:
@@ -210,10 +241,12 @@ async def process_proxy(raw: dict):
         except Exception:
             return None
 
+    # ─── 3. Геолокация ───
     geo = await geolocate(lookup_ip)
     if not geo:
         return None
 
+    # ─── 4. Обогащение данными ───
     raw.update({
         "ping": f"{ping} ms",
         "country": geo.get("country", "Unknown"),
