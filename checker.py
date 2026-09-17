@@ -1,8 +1,10 @@
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import socket
 import os
+
 import aiohttp
 from aiohttp_socks import ProxyConnector, ProxyType
 from telethon import TelegramClient
@@ -31,9 +33,12 @@ TG_SESSION = os.environ.get("TG_SESSION")
 TEST_URL_TG = "https://api.telegram.org"
 TEST_URL_RU = "https://ya.ru"
 
+# ─── КЭШ ГЕОЛОКАЦИИ (чтобы не долбить ip-api.com повторно) ─────────────
+_geo_cache: dict = {}
+_geo_lock = asyncio.Lock()
+
 
 # ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ASYNCIO ──────────────────────────────────
-
 def _silence_telethon_futures(loop, context):
     msg = context.get("message", "")
     if "Future exception was never retrieved" in msg:
@@ -42,7 +47,6 @@ def _silence_telethon_futures(loop, context):
 
 
 # ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
-
 def _is_ip(s: str) -> bool:
     """Проверяет, является ли строка IP-адресом (IPv4 или IPv6)."""
     try:
@@ -52,22 +56,49 @@ def _is_ip(s: str) -> bool:
         return False
 
 
+def make_id(ip: str, port) -> int:
+    """
+    Детерминированный ID прокси.
+    ВАЖНО: встроенный hash() для строк рандомизируется PYTHONHASHSEED
+    на каждый запуск процесса — одинаковый прокси получал бы разный id
+    от запуска к запуску. Используем md5, чтобы id был стабилен.
+    """
+    digest = hashlib.md5(f"{ip}:{port}".encode()).hexdigest()
+    return int(digest, 16) % 10_000_000
+
+
 async def geolocate(ip: str) -> dict:
-    """Геолокация через ip-api.com."""
+    """Геолокация через ip-api.com с кэшем и retry при 429 (rate limit)."""
+    async with _geo_lock:
+        cached = _geo_cache.get(ip)
+    if cached is not None:
+        return cached
+
+    result = {}
     async with aiohttp.ClientSession() as s:
-        try:
-            async with s.get(
-                f"http://ip-api.com/json/{ip}"
-                "?fields=status,country,countryCode,city,isp,query",
-                timeout=aiohttp.ClientTimeout(total=8),
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if data.get("status") == "success":
-                        return data
-        except Exception:
-            pass
-    return {}
+        for attempt in range(3):
+            try:
+                async with s.get(
+                    f"http://ip-api.com/json/{ip}"
+                    "?fields=status,country,countryCode,city,isp,query",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status == 429:
+                        # уперлись в лимит free-плана — подождём и повторим
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                    if r.status == 200:
+                        data = await r.json()
+                        if data.get("status") == "success":
+                            result = data
+                    break
+            except Exception as e:
+                logger.debug(f"geolocate error {ip}: {e}")
+                break
+
+    async with _geo_lock:
+        _geo_cache[ip] = result
+    return result
 
 
 def country_flag(code: str) -> str:
@@ -79,7 +110,6 @@ def country_flag(code: str) -> str:
 
 
 # ─── MTProto / WEB (через Telethon) ────────────────────────────────────
-
 async def _one_mtproto_handshake(host, port, secret, timeout):
     """Одна попытка handshake. Возвращает пинг в мс или None."""
     try:
@@ -101,41 +131,39 @@ async def _one_mtproto_handshake(host, port, secret, timeout):
             auto_reconnect=False,
             request_retries=1,
         )
-        t0 = asyncio.get_event_loop().time()
+        t0 = asyncio.get_running_loop().time()
         await asyncio.wait_for(client.connect(), timeout=timeout)
         if not client.is_connected():
             return None
         await asyncio.wait_for(client(GetConfigRequest()), timeout=timeout)
-        ping = int((asyncio.get_event_loop().time() - t0) * 1000)
+        ping = int((asyncio.get_running_loop().time() - t0) * 1000)
         try:
             await asyncio.wait_for(client.disconnect(), timeout=3)
         except Exception:
             pass
         return ping
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        pass
-    except Exception:
-        pass
+        return None
+    except Exception as e:
+        logger.debug(f"mtproto handshake {host}:{port} failed: {e}")
+        return None
     finally:
         if client:
             try:
                 await asyncio.wait_for(client.disconnect(), timeout=2)
             except Exception:
                 pass
-    return None
 
 
 async def check_telegram_proxy(host: str, port: int, secret: str, is_web: bool = False):
     """
     Проверка MTProto/WEB через реальный handshake Telethon.
-
     Для MTProto — 3 последовательные попытки. Если хотя бы одна провалилась,
     прокси считается нестабильным и отсеивается.
     Для WEB — 2 попытки (WEB и так нестабильны, слишком строго не нужно).
     """
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
     attempts = 2 if is_web else 3
-
     pings = []
     for i in range(attempts):
         ping = await _one_mtproto_handshake(host, port, secret, timeout)
@@ -146,68 +174,70 @@ async def check_telegram_proxy(host: str, port: int, secret: str, is_web: bool =
             await asyncio.sleep(0.5)
 
     avg_ping = sum(pings) / len(pings)
-
-    if is_web:
-        return int(avg_ping) if avg_ping < MAX_PING_WEB_MS else None
-    return int(avg_ping) if avg_ping < MAX_PING_MS else None
+    limit = MAX_PING_WEB_MS if is_web else MAX_PING_MS
+    return int(avg_ping) if avg_ping < limit else None
 
 
 # ─── SOCKS5 (СТРОГАЯ ПРОВЕРКА: Telegram + ya.ru) ───────────────────────
-
-async def _socks5_get(connector, url: str, timeout: float):
-    """Один GET-запрос через SOCKS5. Возвращает HTTP-статус или None."""
-    try:
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=timeout),
-                allow_redirects=False,
-            ) as resp:
-                return resp.status
-    except Exception:
-        return None
-
-
 async def check_socks5(host: str, port: int):
     """
     Строгая проверка SOCKS5:
-      - обязательный доступ к api.telegram.org
-      - обязательный доступ к ya.ru
-
+    - обязательный доступ к api.telegram.org
+    - обязательный доступ к ya.ru
     Публикуем только если пройдены ОБА теста.
-    Возвращает пинг (мс) или None.
+
+    ВАЖНО: оба запроса выполняются через ОДНУ и ту же ClientSession.
+    Раньше на каждый запрос создавалась новая ClientSession с тем же
+    connector — а connector_owner=True по умолчанию закрывает connector
+    при выходе из первой сессии, из-за чего второй запрос падал с
+    "Connector is closed" и check_socks5 ВСЕГДА возвращал None.
     """
+    connector = ProxyConnector(
+        proxy_type=ProxyType.SOCKS5,
+        host=host, port=int(port), rdns=True,
+    )
     try:
-        connector = ProxyConnector(
-            proxy_type=ProxyType.SOCKS5,
-            host=host, port=int(port), rdns=True,
-        )
-        t0 = asyncio.get_event_loop().time()
+        async with aiohttp.ClientSession(connector=connector) as session:
+            t0 = asyncio.get_running_loop().time()
 
-        # 1. Telegram (обязательно)
-        tg_status = await _socks5_get(connector, TEST_URL_TG, CHECK_TIMEOUT)
-        if tg_status is None or tg_status >= 500:
-            return None
+            try:
+                async with session.get(
+                    TEST_URL_TG,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                    allow_redirects=False,
+                ) as resp:
+                    tg_status = resp.status
+            except Exception:
+                tg_status = None
+            if tg_status is None or tg_status >= 500:
+                return None
 
-        # 2. ya.ru (обязательно)
-        ru_status = await _socks5_get(connector, TEST_URL_RU, CHECK_TIMEOUT)
-        if ru_status is None or ru_status >= 500:
-            return None
+            try:
+                async with session.get(
+                    TEST_URL_RU,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                    allow_redirects=False,
+                ) as resp:
+                    ru_status = resp.status
+            except Exception:
+                ru_status = None
+            if ru_status is None or ru_status >= 500:
+                return None
 
-        ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
-        return ping if ping < MAX_PING_MS else None
-    except Exception:
+            ping = round((asyncio.get_running_loop().time() - t0) * 1000, 1)
+            return ping if ping < MAX_PING_MS else None
+    except Exception as e:
+        logger.debug(f"socks5 check {host}:{port} failed: {e}")
         return None
 
 
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
-
 async def process_proxy(raw: dict):
     """
     Полный цикл проверки одного прокси:
-      1) Проверка работоспособности (по протоколу)
-      2) Геолокация
-      3) Обогащение данными (ping, страна, город, провайдер)
-
+    1) Проверка работоспособности (по протоколу)
+    2) Геолокация
+    3) Обогащение данными (ping, страна, город, провайдер)
     Возвращает обогащённый словарь или None, если прокси не работает.
     """
     proto = raw["protocol"].upper()
@@ -216,17 +246,13 @@ async def process_proxy(raw: dict):
 
     # ─── 1. Проверка по протоколу ───
     if proto == "MTPROTO":
-        # Оставляем только Fake TLS (secret начинается с 'ee')
         if not raw.get("secret", "").startswith("ee"):
             return None
         ping = await check_telegram_proxy(ip, port, raw["secret"], is_web=False)
-
     elif proto == "WEB":
         ping = await check_telegram_proxy(ip, port, raw["secret"], is_web=True)
-
     elif proto == "SOCKS5":
         ping = await check_socks5(ip, port)
-
     else:
         return None
 
@@ -254,6 +280,6 @@ async def process_proxy(raw: dict):
         "city": geo.get("city", "Unknown"),
         "provider": geo.get("isp", "Unknown"),
         "flag": country_flag(geo.get("countryCode", "")),
-        "id": abs(hash(f"{ip}:{port}")) % 10_000_000,
+        "id": make_id(ip, port),
     })
     return raw
