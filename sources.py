@@ -1,21 +1,35 @@
 import aiohttp
 import logging
+import base64
+import json
+from urllib.parse import urlparse, parse_qs, unquote
 
 logger = logging.getLogger(__name__)
 
-# MTProto (fake TLS)
+# ─── ИСТОЧНИКИ (с добавлением RU-сегмента) ───────────────────────────────
+
+# MTProto: SoliSpirit — обновляется каждые 12 часов, авто-проверка
 MTPROTO_URLS = [
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
     "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
+    "https://raw.githubusercontent.com/ALIILAPRO/MTProtoProxy/main/mtproto.txt",
 ]
 
-# SOCKS5
+# MTProto для России (маскировка под Yandex, VK и др.)
+RU_MTPROTO_URL = "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/proxy_ru.txt"
+
+# SOCKS5 (строгая проверка)
 SOCKS5_URL = "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
 SOCKS5_FALLBACK = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
 
 # WEB-прокси
 WEB_PROXY_URL = "https://mtpro.xyz/api/?type=webproxy"
 
+# MTProto из JSON (LoneKingCode)
+LONEKING_MT_URL = "https://raw.githubusercontent.com/LoneKingCode/free-proxy-db/refs/heads/main/proxies/mtproto.json"
+
+
+# ─── ЗАГРУЗЧИКИ ─────────────────────────────────────────────────────────
 
 async def _get_text(session, url):
     try:
@@ -38,7 +52,10 @@ async def _get_json(session, url):
     return []
 
 
+# ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
+
 def _parse_tg_link(line: str):
+    """Парсит tg://proxy ссылку. Оставляет только Fake TLS (ee) и WEB (dd)."""
     if "tg://proxy?" not in line and "t.me/proxy?" not in line:
         return None
     try:
@@ -74,6 +91,27 @@ def _parse_socks5_line(line: str):
         return None
 
 
+def _parse_loneking_json(item: dict):
+    """Парсит MTProto из JSON LoneKingCode."""
+    try:
+        if item.get("protocol") == "mtproto" and item.get("secret"):
+            secret = item["secret"]
+            if not (secret.startswith("ee") or secret.startswith("dd")):
+                return None
+            proto = "WEB" if secret.startswith("dd") else "MTPROTO"
+            return {
+                "protocol": proto,
+                "ip": item["server"],
+                "port": int(item["port"]),
+                "secret": secret,
+                "raw": item.get("link", ""),
+            }
+    except Exception:
+        return None
+
+
+# ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
+
 async def fetch_all_proxies() -> list:
     result = []
     seen = set()
@@ -85,13 +123,24 @@ async def fetch_all_proxies() -> list:
             result.append(p)
 
     async with aiohttp.ClientSession() as s:
+        # MTProto / WEB из tg:// ссылок
         for url in MTPROTO_URLS:
             lines = await _get_text(s, url)
             for line in lines:
                 p = _parse_tg_link(line)
                 if p:
                     add(p)
+            logger.info(f"{url.split('/')[-2]}: загружено {len(lines)} строк")
 
+        # RU MTProto (маскировка под российские сервисы)
+        ru_lines = await _get_text(s, RU_MTPROTO_URL)
+        for line in ru_lines:
+            p = _parse_tg_link(line)
+            if p:
+                add(p)
+        logger.info(f"RU MTProto: загружено {len(ru_lines)} строк")
+
+        # WEB из mtpro.xyz
         web_data = await _get_json(s, WEB_PROXY_URL)
         if web_data:
             items = web_data if isinstance(web_data, list) else web_data.get("proxies", [])
@@ -104,12 +153,25 @@ async def fetch_all_proxies() -> list:
                         "secret": item["secret"],
                         "raw": "",
                     })
+            logger.info(f"mtpro.xyz webproxy: {len(items)} записей")
 
+        # MTProto из JSON LoneKingCode
+        json_data = await _get_json(s, LONEKING_MT_URL)
+        if json_data:
+            items = json_data if isinstance(json_data, list) else json_data.get("proxies", [])
+            for item in items:
+                p = _parse_loneking_json(item)
+                if p:
+                    add(p)
+            logger.info(f"LoneKing MTProto: {len(items)} записей")
+
+        # SOCKS5
         for line in await _get_text(s, SOCKS5_URL):
             p = _parse_socks5_line(line)
             if p:
                 add(p)
 
+    # Резервный SOCKS5
     if len([p for p in result if p["protocol"] == "SOCKS5"]) < 50:
         async with aiohttp.ClientSession() as s:
             for line in await _get_text(s, SOCKS5_FALLBACK):
