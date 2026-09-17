@@ -1,8 +1,8 @@
-import aiohttp
 import logging
-import base64
-import json
-from urllib.parse import urlparse, parse_qs, unquote
+from collections import Counter
+from urllib.parse import urlparse, parse_qs
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +30,13 @@ LONEKING_MT_URL = "https://raw.githubusercontent.com/LoneKingCode/free-proxy-db/
 
 
 # ─── ЗАГРУЗЧИКИ ─────────────────────────────────────────────────────────
-
 async def _get_text(session, url):
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
             if r.status == 200:
                 text = await r.text()
                 return [l.strip() for l in text.splitlines() if l.strip()]
+            logger.warning(f"{url}: HTTP {r.status}")
     except Exception as e:
         logger.warning(f"Text fetch failed {url}: {e}")
     return []
@@ -47,23 +47,28 @@ async def _get_json(session, url):
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
             if r.status == 200:
                 return await r.json()
+            logger.warning(f"{url}: HTTP {r.status}")
     except Exception as e:
         logger.warning(f"JSON fetch failed {url}: {e}")
     return []
 
 
 # ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
-
 def _parse_tg_link(line: str):
-    """Парсит tg://proxy ссылку. Оставляет только Fake TLS (ee) и WEB (dd)."""
+    """
+    Парсит tg://proxy ссылку. Оставляет только Fake TLS (ee) и WEB (dd).
+    Используем urlparse/parse_qs вместо ручного split("="), чтобы
+    параметры корректно URL-декодировались (раньше secret/server могли
+    прийти в "сыром" percent-encoded виде и ломать прокси).
+    """
     if "tg://proxy?" not in line and "t.me/proxy?" not in line:
         return None
     try:
-        query = line.split("?", 1)[1]
-        params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
-        server = params.get("server")
-        port = params.get("port")
-        secret = params.get("secret")
+        query = urlparse(line).query
+        params = parse_qs(query)
+        server = params.get("server", [None])[0]
+        port = params.get("port", [None])[0]
+        secret = params.get("secret", [None])[0]
         if not all([server, port, secret]):
             return None
         if not (secret.startswith("ee") or secret.startswith("dd")):
@@ -81,9 +86,24 @@ def _parse_tg_link(line: str):
 
 
 def _parse_socks5_line(line: str):
-    if ":" not in line:
+    """
+    Парсит 'ip:port' и 'user:pass@ip:port'.
+    Раньше поддерживался только 'ip:port' — строка вида
+    'user:pass@1.2.3.4:1080' ломала парсер (rsplit по ':' отдавал
+    кусок 'user:pass@1.2.3.4' как "ip").
+    """
+    line = line.strip()
+    if not line:
         return None
-    ip, port = line.rsplit(":", 1)
+
+    hostport = line.rpartition("@")[2] if "@" in line else line
+    if ":" not in hostport:
+        return None
+
+    ip, _, port = hostport.rpartition(":")
+    if not ip or not port:
+        return None
+
     try:
         return {"protocol": "SOCKS5", "ip": ip.strip(),
                 "port": int(port.strip()), "raw": line}
@@ -108,10 +128,10 @@ def _parse_loneking_json(item: dict):
             }
     except Exception:
         return None
+    return None
 
 
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
-
 async def fetch_all_proxies() -> list:
     result = []
     seen = set()
@@ -179,7 +199,6 @@ async def fetch_all_proxies() -> list:
                 if p:
                     add(p)
 
-    from collections import Counter
     stats = Counter(p["protocol"] for p in result)
     logger.info(f"Итого: {dict(stats)}")
     return result
