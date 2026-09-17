@@ -3,7 +3,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ (проверены на сентябрь 2026) ────────────────────────────
+# ─── ИСТОЧНИКИ (без HTTP) ─────────────────────────────────────────────
 
 # MTProto: SoliSpirit — обновляется каждые 12 часов, авто-проверка
 MTPROTO_URLS = [
@@ -11,15 +11,11 @@ MTPROTO_URLS = [
     "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
 ]
 
-# SOCKS5 / HTTP: обновляются ежечасно с авто-проверкой
+# SOCKS5: обновляется ежечасно с авто-проверкой
 SOCKS5_URL = "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
-HTTP_URL = "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
-
-# Резервные источники SOCKS5/HTTP
 SOCKS5_FALLBACK = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
-HTTP_FALLBACK = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
 
-# WEB-прокси: агрегатор mtpro.xyz (парсит Telegram-каналы)
+# WEB-прокси: агрегатор mtpro.xyz
 WEB_PROXY_URL = "https://mtpro.xyz/api/?type=webproxy"
 
 
@@ -83,21 +79,11 @@ def _parse_socks5_line(line: str):
         return None
 
 
-def _parse_http_line(line: str):
-    if ":" not in line:
-        return None
-    ip, port = line.rsplit(":", 1)
-    try:
-        return {"protocol": "HTTP", "ip": ip.strip(), "port": int(port.strip())}
-    except ValueError:
-        return None
-
-
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def fetch_all_proxies() -> list:
     """
-    Собирает прокси из всех источников.
+    Собирает прокси MTProto, WEB и SOCKS5.
     Возвращает список словарей: protocol, ip, port [, secret].
     """
     result = []
@@ -140,22 +126,11 @@ async def fetch_all_proxies() -> list:
             if p:
                 add(p)
 
-        # ── HTTP ──
-        lines = await _get_text(s, HTTP_URL)
-        for line in lines:
-            p = _parse_http_line(line)
-            if p:
-                add(p)
-
-    # Если основных источников мало — добираем из резервных
-    if len([p for p in result if p["protocol"] in ("SOCKS5", "HTTP")]) < 50:
+    # Если SOCKS5 мало — добираем из резервного источника
+    if len([p for p in result if p["protocol"] == "SOCKS5"]) < 50:
         async with aiohttp.ClientSession() as s:
             for line in await _get_text(s, SOCKS5_FALLBACK):
                 p = _parse_socks5_line(line)
-                if p:
-                    add(p)
-            for line in await _get_text(s, HTTP_FALLBACK):
-                p = _parse_http_line(line)
                 if p:
                     add(p)
 
