@@ -33,26 +33,12 @@ def format_message(p: dict) -> str:
     city = p.get("city", "Unknown")
     provider = p.get("provider", "Unknown")
     ping = p.get("ping", "N/A")
-    white = p.get("is_white", False)
 
     icon = PROTO_ICON.get(proto, "🔗")
     label = PROTO_LABEL.get(proto, proto)
 
     if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
         label += " · 🛡 Fake TLS"
-
-    header = ""
-    if white:
-        header = (
-            "💎 <b>WHITE IP PROXY</b> 💎\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⭐️ Приоритетная публикация\n\n"
-        )
-
-    if white:
-        white_line = "├ ✅ <b>Белый IP:</b> Да · подтверждён\n"
-    else:
-        white_line = "├ ⚪️ <b>Белый IP:</b> Нет\n"
 
     ip_label = "🌐 Домен" if proto == "WEB" else "📍 IP"
 
@@ -62,14 +48,17 @@ def format_message(p: dict) -> str:
         f"\n"
         f"┌ {icon} <b>Протокол:</b> {label}\n"
         f"├ 🌐 <b>Пинг:</b> <code>{ping}</code>\n"
-        f"{white_line}"
         f"├ 🏳️ <b>Страна:</b> {flag} {country}\n"
         f"├ 🏙 <b>Город:</b> {city}\n"
         f"├ 🏢 <b>Провайдер:</b> {provider}\n"
         f"└ {ip_label}: <code>{p['ip']}</code>\n"
     )
 
-    return f"{header}{body}"
+    # Для SOCKS5 — честная пометка, что проверен через ya.ru
+    if proto == "SOCKS5":
+        body += "\n✅ Проверен на доступ к ya.ru"
+
+    return body
 
 
 def build_keyboard(p: dict):
