@@ -10,7 +10,6 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
-# ─── ГЛУШИМ ЛОГИ TELETHON ──────────────────────────────────────────────
 for name in ("telethon", "telethon.network", "telethon.client",
              "telethon.network.mtprotosender", "telethon.network.connection"):
     logging.getLogger(name).setLevel(logging.CRITICAL)
@@ -18,17 +17,13 @@ for name in ("telethon", "telethon.network", "telethon.client",
 logger = logging.getLogger(__name__)
 
 MAX_PING_MS = 5000
-CHECK_TIMEOUT = 5
+CHECK_TIMEOUT = 6
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-# Тестовые URL для проверки
-TEST_URL_MT = "https://api.ipify.org?format=json"  # для MTProto/WEB
-TEST_URL_SOCKS = "https://ya.ru"                    # для SOCKS5 — проверка доступности в РФ
+TEST_URL_SOCKS = "https://ya.ru"
 
-
-# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ASYNCIO ──────────────────────────────────
 
 def _silence_telethon_futures(loop, context):
     msg = context.get("message", "")
@@ -36,8 +31,6 @@ def _silence_telethon_futures(loop, context):
         return
     loop.default_exception_handler(context)
 
-
-# ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
 
 def is_white_ip(ip: str) -> bool:
     try:
@@ -72,10 +65,7 @@ def country_flag(code: str) -> str:
             + chr(0x1F1E6 + ord(code[1].upper()) - 65))
 
 
-# ─── ПРОВЕРКА MTProto / WEB ────────────────────────────────────────────
-
 async def check_telegram_proxy(host: str, port: int, secret: str):
-    """Проверяет MTProto/WEB прокси через реальный handshake Telethon."""
     try:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_silence_telethon_futures)
@@ -119,13 +109,7 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
     return None
 
 
-# ─── ПРОВЕРКА SOCKS5 (через ya.ru) ────────────────────────────────────
-
 async def check_socks5(host: str, port: int):
-    """
-    Проверяет SOCKS5-прокси запросом к ya.ru.
-    Это отсеивает прокси, заблокированные в России.
-    """
     try:
         connector = ProxyConnector(
             proxy_type=ProxyType.SOCKS5,
@@ -144,10 +128,7 @@ async def check_socks5(host: str, port: int):
     return None
 
 
-# ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
-
 async def process_proxy(raw: dict):
-    """Полный цикл: реальная проверка → геолокация → белый IP."""
     proto = raw["protocol"].upper()
     ip = raw["ip"]
     port = raw["port"]
