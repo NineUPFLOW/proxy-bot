@@ -1,3 +1,5 @@
+from html import escape
+
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 PROTO_ICON = {
@@ -16,7 +18,6 @@ PROTO_LABEL = {
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
     ip, port = p["ip"], p["port"]
-
     if proto == "MTPROTO":
         return f"tg://proxy?server={ip}&port={port}&secret={p['secret']}"
     if proto == "SOCKS5":
@@ -30,7 +31,6 @@ def build_connect_link(p: dict) -> str:
 def _build_label(p: dict) -> str:
     proto = p["protocol"].upper()
     label = PROTO_LABEL.get(proto, proto)
-
     if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
         label += " · 🛡 Fake TLS"
     if proto == "WEB":
@@ -39,20 +39,30 @@ def _build_label(p: dict) -> str:
 
 
 def format_message(p: dict) -> str:
+    """
+    ВАЖНО: country/city/provider приходят из внешнего API (ip-api.com)
+    и не считаются доверенными данными. Сообщение отправляется с
+    parse_mode=HTML, поэтому спецсимволы (<, >, &) в этих полях нужно
+    экранировать — иначе Telegram вернёт ошибку "can't parse entities"
+    (и прокси просто не опубликуется) либо в текст попадёт "чужая" HTML-
+    разметка.
+    """
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
-    country = p.get("country", "Unknown")
-    city = p.get("city", "Unknown")
-    provider = p.get("provider", "Unknown")
-    ping = p.get("ping", "N/A")
+    country = escape(str(p.get("country", "Unknown")))
+    city = escape(str(p.get("city", "Unknown")))
+    provider = escape(str(p.get("provider", "Unknown")))
+    ping = escape(str(p.get("ping", "N/A")))
+    ip = escape(str(p.get("ip", "")))
+    pid = escape(str(p.get("id", "")))
 
     icon = PROTO_ICON.get(proto, "🔗")
-    label = _build_label(p)
+    label = escape(_build_label(p))
 
     ip_label = "🌐 Домен" if proto == "WEB" else "📍 IP"
 
     body = (
-        f"{flag} <b>{country}</b>  ·  <code>#{p['id']}</code>\n"
+        f"{flag} <b>{country}</b> · <code>#{pid}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n"
         f"┌ {icon} <b>{label}</b>\n"
@@ -60,7 +70,7 @@ def format_message(p: dict) -> str:
         f"├ 🏳️ <b>Страна:</b> {flag} {country}\n"
         f"├ 🏙 <b>Город:</b> {city}\n"
         f"├ 🏢 <b>Провайдер:</b> {provider}\n"
-        f"└ {ip_label}: <code>{p['ip']}</code>\n"
+        f"└ {ip_label}: <code>{ip}</code>\n"
     )
 
     footer_parts = []
@@ -80,7 +90,6 @@ def format_message(p: dict) -> str:
 def build_keyboard(p: dict):
     proto = p["protocol"].upper()
     link = build_connect_link(p)
-
     if proto == "WEB":
         label = "🌐 Подключить WEB-прокси"
     elif proto == "SOCKS5":
