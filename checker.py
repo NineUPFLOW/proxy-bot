@@ -26,6 +26,16 @@ TG_SESSION = os.environ.get("TG_SESSION")
 TEST_URL = "https://api.ipify.org?format=json"
 
 
+# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ASYNCIO ОТ TELETHON ──────────────────────
+
+def _silence_telethon_futures(loop, context):
+    """Игнорирует 'Future exception was never retrieved' от Telethon."""
+    msg = context.get("message", "")
+    if "Future exception was never retrieved" in msg:
+        return
+    loop.default_exception_handler(context)
+
+
 # ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
 
 def is_white_ip(ip: str) -> bool:
@@ -64,11 +74,14 @@ def country_flag(code: str) -> str:
 # ─── ПРОВЕРКА MTProto / WEB ────────────────────────────────────────────
 
 async def check_telegram_proxy(host: str, port: int, secret: str):
-    """
-    Пытается подключиться к Telegram через прокси.
-    Возвращает пинг (мс) или None.
-    Оборачивает ВСЁ в try/except, включая фоновые задачи Telethon.
-    """
+    """Проверяет MTProto/WEB прокси через реальный handshake Telethon."""
+    # Глушим шумные исключения Telethon
+    try:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(_silence_telethon_futures)
+    except RuntimeError:
+        pass
+
     client = None
     try:
         client = TelegramClient(
@@ -77,21 +90,18 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
             connection=ConnectionTcpMTProxyRandomizedIntermediate,
             proxy=(host, int(port), secret),
             timeout=CHECK_TIMEOUT,
-            connection_retries=0,   # БЕЗ ретраев — иначе долго висит
+            connection_retries=0,
             retry_delay=0,
-            auto_reconnect=False,   # не пытаться переподключаться
+            auto_reconnect=False,
             request_retries=1,
         )
         t0 = asyncio.get_event_loop().time()
 
-        # Ограничиваем всё подключение жёстким таймаутом
         await asyncio.wait_for(client.connect(), timeout=CHECK_TIMEOUT)
-
         if not client.is_connected():
             return None
 
-        await asyncio.wait_for(client(GetConfigRequest()),
-                               timeout=CHECK_TIMEOUT)
+        await asyncio.wait_for(client(GetConfigRequest()), timeout=CHECK_TIMEOUT)
         ping = int((asyncio.get_event_loop().time() - t0) * 1000)
 
         try:
