@@ -22,6 +22,7 @@ def build_connect_link(p: dict) -> str:
     if proto == "SOCKS5":
         return f"tg://socks?server={ip}&port={port}"
     if proto == "WEB":
+        # Порт 443 подразумевается и НЕ указывается в ссылке
         return f"tg://webproxy?server={ip}&secret={p['secret']}"
     return ""
 
@@ -31,10 +32,9 @@ def _build_label(p: dict) -> str:
     label = PROTO_LABEL.get(proto, proto)
 
     if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
-        label += " · 🛡 Fake TLS (РФ)"
+        label += " · 🛡 Fake TLS"
     if proto == "WEB":
         label += " · ⚠️ нестабильный"
-
     return label
 
 
@@ -68,6 +68,8 @@ def format_message(p: dict) -> str:
         footer_parts.append("✅ Строгая проверка: Telegram + ya.ru пройдены")
     if proto == "WEB":
         footer_parts.append("⚠️ WEB-прокси работают нестабильно")
+    if proto == "MTPROTO":
+        footer_parts.append("⚠️ MTProto-прокси могут блокироваться ТСПУ")
 
     if footer_parts:
         body += "\n" + "\n".join(footer_parts)
