@@ -23,13 +23,14 @@ API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-TEST_URL = "https://api.ipify.org?format=json"
+# Тестовые URL для проверки
+TEST_URL_MT = "https://api.ipify.org?format=json"  # для MTProto/WEB
+TEST_URL_SOCKS = "https://ya.ru"                    # для SOCKS5 — проверка доступности в РФ
 
 
-# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ASYNCIO ОТ TELETHON ──────────────────────
+# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ASYNCIO ──────────────────────────────────
 
 def _silence_telethon_futures(loop, context):
-    """Игнорирует 'Future exception was never retrieved' от Telethon."""
     msg = context.get("message", "")
     if "Future exception was never retrieved" in msg:
         return
@@ -95,21 +96,16 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
             request_retries=1,
         )
         t0 = asyncio.get_event_loop().time()
-
         await asyncio.wait_for(client.connect(), timeout=CHECK_TIMEOUT)
         if not client.is_connected():
             return None
-
         await asyncio.wait_for(client(GetConfigRequest()), timeout=CHECK_TIMEOUT)
         ping = int((asyncio.get_event_loop().time() - t0) * 1000)
-
         try:
             await asyncio.wait_for(client.disconnect(), timeout=3)
         except Exception:
             pass
-
         return ping if ping < MAX_PING_MS else None
-
     except (asyncio.TimeoutError, asyncio.CancelledError):
         pass
     except Exception:
@@ -123,10 +119,13 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
     return None
 
 
-# ─── ПРОВЕРКА SOCKS5 ───────────────────────────────────────────────────
+# ─── ПРОВЕРКА SOCKS5 (через ya.ru) ────────────────────────────────────
 
 async def check_socks5(host: str, port: int):
-    """Проверяет SOCKS5-прокси реальным HTTP-запросом через него."""
+    """
+    Проверяет SOCKS5-прокси запросом к ya.ru.
+    Это отсеивает прокси, заблокированные в России.
+    """
     try:
         connector = ProxyConnector(
             proxy_type=ProxyType.SOCKS5,
@@ -135,9 +134,9 @@ async def check_socks5(host: str, port: int):
         t0 = asyncio.get_event_loop().time()
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
-                TEST_URL, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT)
+                TEST_URL_SOCKS, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT)
             ) as resp:
-                if resp.status == 200:
+                if resp.status in (200, 301, 302):
                     ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
                     return ping if ping < MAX_PING_MS else None
     except Exception:
@@ -148,10 +147,7 @@ async def check_socks5(host: str, port: int):
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def process_proxy(raw: dict):
-    """
-    Полный цикл: реальная проверка -> геолокация -> белый IP.
-    Возвращает обогащённый словарь или None, если прокси не работает.
-    """
+    """Полный цикл: реальная проверка → геолокация → белый IP."""
     proto = raw["protocol"].upper()
     ip = raw["ip"]
     port = raw["port"]
