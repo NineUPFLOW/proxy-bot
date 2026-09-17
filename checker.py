@@ -75,7 +75,6 @@ def country_flag(code: str) -> str:
 
 async def check_telegram_proxy(host: str, port: int, secret: str):
     """Проверяет MTProto/WEB прокси через реальный handshake Telethon."""
-    # Глушим шумные исключения Telethon
     try:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_silence_telethon_futures)
@@ -124,9 +123,10 @@ async def check_telegram_proxy(host: str, port: int, secret: str):
     return None
 
 
-# ─── ПРОВЕРКА SOCKS5 / HTTP ────────────────────────────────────────────
+# ─── ПРОВЕРКА SOCKS5 ───────────────────────────────────────────────────
 
 async def check_socks5(host: str, port: int):
+    """Проверяет SOCKS5-прокси реальным HTTP-запросом через него."""
     try:
         connector = ProxyConnector(
             proxy_type=ProxyType.SOCKS5,
@@ -145,26 +145,13 @@ async def check_socks5(host: str, port: int):
     return None
 
 
-async def check_http(host: str, port: int):
-    try:
-        proxy_url = f"http://{host}:{port}"
-        t0 = asyncio.get_event_loop().time()
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                TEST_URL, proxy=proxy_url,
-                timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
-            ) as resp:
-                if resp.status == 200:
-                    ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
-                    return ping if ping < MAX_PING_MS else None
-    except Exception:
-        pass
-    return None
-
-
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def process_proxy(raw: dict):
+    """
+    Полный цикл: реальная проверка -> геолокация -> белый IP.
+    Возвращает обогащённый словарь или None, если прокси не работает.
+    """
     proto = raw["protocol"].upper()
     ip = raw["ip"]
     port = raw["port"]
@@ -173,8 +160,6 @@ async def process_proxy(raw: dict):
         ping = await check_telegram_proxy(ip, port, raw["secret"])
     elif proto == "SOCKS5":
         ping = await check_socks5(ip, port)
-    elif proto == "HTTP":
-        ping = await check_http(ip, port)
     else:
         return None
 
