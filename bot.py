@@ -6,6 +6,7 @@ import random
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import LinkPreviewOptions
 
 from sources import fetch_all_proxies
 from checker import process_proxy
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-PUBLISH_COUNT = 3      # сколько прокси публиковать за один запуск
+PUBLISH_COUNT = 5      # сколько прокси публиковать за один запуск
 CONCURRENCY = 10       # сколько прокси проверять параллельно
 
 
@@ -81,7 +82,7 @@ async def main():
                 chat_id=CHAT_ID,
                 text=format_message(p),
                 reply_markup=build_keyboard(p),
-                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             logger.info(f"Опубликован {p['protocol']} #{p['id']}")
             await asyncio.sleep(3)
