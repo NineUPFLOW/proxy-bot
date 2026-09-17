@@ -1,7 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ─── ИКОНКИ И НАЗВАНИЯ ПРОТОКОЛОВ ──────────────────────────────────────
-
 PROTO_ICON = {
     "MTPROTO": "🔐",
     "SOCKS5": "🧦",
@@ -14,8 +12,6 @@ PROTO_LABEL = {
     "WEB": "WEB (TgWebProxy)",
 }
 
-
-# ─── ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ ────────────────────────────────────────────
 
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
@@ -30,21 +26,17 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
-# ─── ЗАГОЛОВОК ПРОТОКОЛА ───────────────────────────────────────────────
-
 def _build_label(p: dict) -> str:
     proto = p["protocol"].upper()
     label = PROTO_LABEL.get(proto, proto)
 
     if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
-        label += " · 🛡 Fake TLS"
+        label += " · 🛡 Fake TLS (РФ)"
     if proto == "WEB":
         label += " · ⚠️ нестабильный"
 
     return label
 
-
-# ─── ТЕКСТ СООБЩЕНИЯ ───────────────────────────────────────────────────
 
 def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
@@ -73,7 +65,7 @@ def format_message(p: dict) -> str:
 
     footer_parts = []
     if proto == "SOCKS5":
-        footer_parts.append("✅ Прокси живой, не заблокирован для российских ресурсов")
+        footer_parts.append("✅ Строгая проверка: Telegram + ya.ru пройдены")
     if proto == "WEB":
         footer_parts.append("⚠️ WEB-прокси работают нестабильно")
 
@@ -82,8 +74,6 @@ def format_message(p: dict) -> str:
 
     return body
 
-
-# ─── КЛАВИАТУРА ────────────────────────────────────────────────────────
 
 def build_keyboard(p: dict):
     proto = p["protocol"].upper()
