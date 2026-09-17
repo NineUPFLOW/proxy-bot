@@ -30,10 +30,9 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
-# ─── ЗАГОЛОВОК СООБЩЕНИЯ ───────────────────────────────────────────────
+# ─── ЗАГОЛОВОК ПРОТОКОЛА ───────────────────────────────────────────────
 
 def _build_label(p: dict) -> str:
-    """Формирует название протокола с пометками."""
     proto = p["protocol"].upper()
     label = PROTO_LABEL.get(proto, proto)
 
@@ -72,10 +71,9 @@ def format_message(p: dict) -> str:
         f"└ {ip_label}: <code>{p['ip']}</code>\n"
     )
 
-    # Подвал с пометками
     footer_parts = []
     if proto == "SOCKS5":
-        footer_parts.append("✅ Проверен на доступ к ya.ru")
+        footer_parts.append("✅ Прокси живой, не заблокирован для российских ресурсов")
     if proto == "WEB":
         footer_parts.append("⚠️ WEB-прокси работают нестабильно")
 
