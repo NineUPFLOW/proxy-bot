@@ -24,7 +24,8 @@ CHAT_ID = os.environ["CHAT_ID"]
 PUBLISH_COUNT = 5
 CONCURRENCY = 10
 
-MAX_SOCKS5_RATIO = 0.4  # не более 40% SOCKS5 (он часто блокируется в РФ)
+MAX_SOCKS5_RATIO = 0.4
+MAX_WEB_COUNT = 2           # не более 2 WEB-прокси за раз (нестабильны)
 
 
 async def check_with_semaphore(sem, raw):
@@ -53,13 +54,20 @@ async def main():
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(*[check_with_semaphore(sem, r) for r in raw_list])
     working = [r for r in results if r]
-    logger.info(f"Рабочих прокси: {len(working)}")
 
-    # Приоритет: MTProto → WEB → SOCKS5 (ограниченно)
+    # ── Статистика по протоколам ──
+    by_proto = {}
+    for p in working:
+        by_proto[p["protocol"]] = by_proto.get(p["protocol"], 0) + 1
+    logger.info(f"Рабочих прокси: {len(working)} | по протоколам: {by_proto}")
+
+    # ── Разделение по типам ──
     mtproto = [p for p in working if p["protocol"] == "MTPROTO"]
     web = [p for p in working if p["protocol"] == "WEB"]
     socks5 = [p for p in working if p["protocol"] == "SOCKS5"]
 
+    # Ограничиваем WEB и SOCKS5
+    web = web[:MAX_WEB_COUNT]
     max_socks5 = max(1, int(PUBLISH_COUNT * MAX_SOCKS5_RATIO))
     socks5 = socks5[:max_socks5]
 
