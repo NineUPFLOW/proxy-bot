@@ -16,21 +16,18 @@ for name in ("telethon", "telethon.network", "telethon.client",
 
 logger = logging.getLogger(__name__)
 
-# Разные лимиты пинга для разных протоколов
-MAX_PING_MS = 5000          # для MTProto и SOCKS5
-MAX_PING_WEB_MS = 2000      # для WEB — строже
+MAX_PING_MS = 5000
+MAX_PING_WEB_MS = 3000  # Для WEB чуть строже
 CHECK_TIMEOUT = 6
 WEB_CHECK_TIMEOUT = 8
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-# URL для проверки SOCKS5
+# URL для проверки SOCKS5 (строгая проверка)
 TEST_URL_TG = "https://api.telegram.org"
 TEST_URL_RU = "https://ya.ru"
 
-
-# ─── ГЛУШИМ ШУМНЫЕ ИСКЛЮЧЕНИЯ ──────────────────────────────────────────
 
 def _silence_telethon_futures(loop, context):
     msg = context.get("message", "")
@@ -39,10 +36,7 @@ def _silence_telethon_futures(loop, context):
     loop.default_exception_handler(context)
 
 
-# ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
-
 def _is_ip(s: str) -> bool:
-    """Проверяет, является ли строка IP-адресом (IPv4 или IPv6)."""
     try:
         ipaddress.ip_address(s)
         return True
@@ -77,7 +71,6 @@ def country_flag(code: str) -> str:
 # ─── MTProto / WEB ─────────────────────────────────────────────────────
 
 async def _one_mtproto_handshake(host, port, secret, timeout):
-    """Одна попытка подключения. Возвращает пинг в мс или None."""
     try:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_silence_telethon_futures)
@@ -122,10 +115,6 @@ async def _one_mtproto_handshake(host, port, secret, timeout):
 
 
 async def check_telegram_proxy(host: str, port: int, secret: str, is_web: bool = False):
-    """
-    Проверка MTProto/WEB.
-    Для WEB — двойная проверка (handshake дважды с паузой).
-    """
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
 
     ping1 = await _one_mtproto_handshake(host, port, secret, timeout)
@@ -148,10 +137,9 @@ async def check_telegram_proxy(host: str, port: int, secret: str, is_web: bool =
     return int(avg_ping)
 
 
-# ─── SOCKS5 (двойная проверка: Telegram + ya.ru) ──────────────────────
+# ─── SOCKS5 (СТРОГАЯ ПРОВЕРКА) ─────────────────────────────────────────
 
 async def _socks5_get(connector, url: str, timeout: float):
-    """Один GET-запрос через SOCKS5. Возвращает статус или None."""
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
@@ -165,11 +153,10 @@ async def _socks5_get(connector, url: str, timeout: float):
 
 async def check_socks5(host: str, port: int):
     """
-    Проверяет SOCKS5 по двум URL:
-      - api.telegram.org — реальная доступность Telegram
-      - ya.ru — косвенная проверка, что не заблокирован в РФ
-    Публикуем только если прошли ОБА теста.
-    Возвращает пинг или None.
+    Строгая проверка SOCKS5:
+      - обязательный доступ к api.telegram.org
+      - обязательный доступ к ya.ru
+    Публикуем только если пройдены ОБА теста.
     """
     try:
         connector = ProxyConnector(
@@ -178,12 +165,12 @@ async def check_socks5(host: str, port: int):
         )
         t0 = asyncio.get_event_loop().time()
 
-        # 1. Telegram
+        # 1. Telegram (обязательно)
         tg_status = await _socks5_get(connector, TEST_URL_TG, CHECK_TIMEOUT)
         if tg_status is None or tg_status >= 500:
             return None
 
-        # 2. ya.ru
+        # 2. ya.ru (обязательно)
         ru_status = await _socks5_get(connector, TEST_URL_RU, CHECK_TIMEOUT)
         if ru_status is None or ru_status >= 500:
             return None
@@ -202,6 +189,9 @@ async def process_proxy(raw: dict):
     port = raw["port"]
 
     if proto == "MTPROTO":
+        # Проверяем, что секрет начинается с 'ee' (Fake TLS)
+        if not raw.get("secret", "").startswith("ee"):
+            return None
         ping = await check_telegram_proxy(ip, port, raw["secret"], is_web=False)
     elif proto == "WEB":
         ping = await check_telegram_proxy(ip, port, raw["secret"], is_web=True)
