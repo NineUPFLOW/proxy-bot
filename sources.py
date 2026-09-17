@@ -1,165 +1,184 @@
-import aiohttp
+import asyncio
+import ipaddress
 import logging
+import socket
+import os
+import aiohttp
+from aiohttp_socks import ProxyConnector, ProxyType
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.tl.functions.help import GetConfigRequest
+from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ (проверены на сентябрь 2026) ────────────────────────────
+MAX_PING_MS = 5000
+CHECK_TIMEOUT = 8
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+TG_SESSION = os.environ.get("TG_SESSION")
 
-# MTProto: SoliSpirit — обновляется каждые 12 часов, авто-проверка
-MTPROTO_URLS = [
-    "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
-    "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
-]
-
-# SOCKS5 / HTTP: обновляются ежечасно с авто-проверкой
-SOCKS5_URL = "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
-HTTP_URL = "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
-
-# Резервные источники SOCKS5/HTTP
-SOCKS5_FALLBACK = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
-HTTP_FALLBACK = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
-
-# WEB-прокси: агрегатор mtpro.xyz (парсит Telegram-каналы)
-WEB_PROXY_URL = "https://mtpro.xyz/api/?type=webproxy"
+TEST_URL = "https://api.ipify.org?format=json"
 
 
-# ─── ЗАГРУЗЧИКИ ────────────────────────────────────────────────────────
+# ─── УТИЛИТЫ ────────────────────────────────────────────────────────────
 
-async def _get_text(session, url):
+def is_white_ip(ip: str) -> bool:
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            if r.status == 200:
-                text = await r.text()
-                return [l.strip() for l in text.splitlines() if l.strip()]
-    except Exception as e:
-        logger.warning(f"Text fetch failed {url}: {e}")
-    return []
+        addr = ipaddress.ip_address(ip.split(":")[0])
+        return not (addr.is_private or addr.is_loopback
+                    or addr.is_reserved or addr.is_multicast)
+    except ValueError:
+        return False
 
 
-async def _get_json(session, url):
+async def geolocate(ip: str) -> dict:
+    async with aiohttp.ClientSession() as s:
+        try:
+            async with s.get(
+                f"http://ip-api.com/json/{ip}"
+                "?fields=status,country,countryCode,city,isp,query",
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if data.get("status") == "success":
+                        return data
+        except Exception:
+            pass
+    return {}
+
+
+def country_flag(code: str) -> str:
+    if not code or len(code) != 2:
+        return "🏳️"
+    return (chr(0x1F1E6 + ord(code[0].upper()) - 65)
+            + chr(0x1F1E6 + ord(code[1].upper()) - 65))
+
+
+# ─── ПРОВЕРКА MTProto / WEB (через Telethon) ────────────────────────────
+
+async def check_telegram_proxy(host: str, port: int, secret: str):
+    """
+    Проверяет MTProto или WEB прокси через реальный handshake Telethon.
+    Возвращает пинг в мс или None, если прокси не работает.
+    """
+    client = TelegramClient(
+        StringSession(TG_SESSION) if TG_SESSION else None,
+        API_ID, API_HASH,
+        connection=ConnectionTcpMTProxyRandomizedIntermediate,
+        proxy=(host, int(port), secret),
+        timeout=CHECK_TIMEOUT,
+        connection_retries=1,
+    )
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            if r.status == 200:
-                return await r.json()
-    except Exception as e:
-        logger.warning(f"JSON fetch failed {url}: {e}")
-    return []
-
-
-# ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
-
-def _parse_tg_link(line: str):
-    """Парсит строку вида tg://proxy?server=...&port=...&secret=..."""
-    if "tg://proxy?" not in line and "t.me/proxy?" not in line:
-        return None
-    try:
-        query = line.split("?", 1)[1]
-        params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
-        server = params.get("server")
-        port = params.get("port")
-        secret = params.get("secret")
-        if not all([server, port, secret]):
+        t0 = asyncio.get_event_loop().time()
+        await client.connect()
+        if not client.is_connected():
             return None
-
-        # Определяем тип по secret: dd = WEB, ee = MTProto
-        proto = "WEB" if secret.startswith("dd") else "MTPROTO"
-        return {
-            "protocol": proto,
-            "ip": server,
-            "port": int(port),
-            "secret": secret,
-        }
-    except Exception:
+        await client(GetConfigRequest())
+        ping = int((asyncio.get_event_loop().time() - t0) * 1000)
+        await client.disconnect()
+        return ping if ping < MAX_PING_MS else None
+    except Exception as e:
+        logger.debug(f"Telethon proxy check failed {host}:{port}: {e}")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
         return None
 
 
-def _parse_socks5_line(line: str):
-    if ":" not in line:
-        return None
-    ip, port = line.rsplit(":", 1)
+# ─── ПРОВЕРКА SOCKS5 / HTTP ─────────────────────────────────────────────
+
+async def check_socks5(host: str, port: int):
+    """Проверяет SOCKS5-прокси реальным HTTP-запросом через него."""
     try:
-        return {"protocol": "SOCKS5", "ip": ip.strip(), "port": int(port.strip())}
-    except ValueError:
-        return None
+        connector = ProxyConnector(
+            proxy_type=ProxyType.SOCKS5,
+            host=host,
+            port=int(port),
+            rdns=True,
+        )
+        t0 = asyncio.get_event_loop().time()
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(
+                TEST_URL, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT)
+            ) as resp:
+                if resp.status == 200:
+                    ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
+                    return ping if ping < MAX_PING_MS else None
+    except Exception as e:
+        logger.debug(f"SOCKS5 check failed {host}:{port}: {e}")
+    return None
 
 
-def _parse_http_line(line: str):
-    if ":" not in line:
-        return None
-    ip, port = line.rsplit(":", 1)
+async def check_http(host: str, port: int):
+    """Проверяет HTTP-прокси реальным HTTP-запросом через него."""
     try:
-        return {"protocol": "HTTP", "ip": ip.strip(), "port": int(port.strip())}
-    except ValueError:
-        return None
+        proxy_url = f"http://{host}:{port}"
+        t0 = asyncio.get_event_loop().time()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                TEST_URL,
+                proxy=proxy_url,
+                timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+            ) as resp:
+                if resp.status == 200:
+                    ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
+                    return ping if ping < MAX_PING_MS else None
+    except Exception as e:
+        logger.debug(f"HTTP check failed {host}:{port}: {e}")
+    return None
 
 
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
-async def fetch_all_proxies() -> list:
+async def process_proxy(raw: dict):
     """
-    Собирает прокси из всех источников.
-    Возвращает список словарей: protocol, ip, port [, secret].
+    Полный цикл: реальная проверка -> геолокация -> белый IP.
+    Возвращает обогащённый словарь или None, если прокси не работает.
     """
-    result = []
-    seen = set()
+    proto = raw["protocol"].upper()
+    ip = raw["ip"]
+    port = raw["port"]
 
-    def add(p):
-        key = (p["protocol"], p["ip"], p["port"])
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
+    # 1. Реальная проверка
+    if proto in ("MTPROTO", "WEB"):
+        ping = await check_telegram_proxy(ip, port, raw["secret"])
+    elif proto == "SOCKS5":
+        ping = await check_socks5(ip, port)
+    elif proto == "HTTP":
+        ping = await check_http(ip, port)
+    else:
+        return None
 
-    async with aiohttp.ClientSession() as s:
-        # ── MTProto / WEB (из tg:// ссылок) ──
-        for url in MTPROTO_URLS:
-            lines = await _get_text(s, url)
-            for line in lines:
-                p = _parse_tg_link(line)
-                if p:
-                    add(p)
-            logger.info(f"{url.split('/')[-2]}: загружено {len(lines)} строк")
+    if ping is None:
+        return None
 
-        # ── WEB-прокси из mtpro.xyz ──
-        web_data = await _get_json(s, WEB_PROXY_URL)
-        if web_data:
-            items = web_data if isinstance(web_data, list) else web_data.get("proxies", [])
-            for item in items:
-                if isinstance(item, dict) and "server" in item and "secret" in item:
-                    add({
-                        "protocol": "WEB",
-                        "ip": item["server"],
-                        "port": int(item.get("port", 443)),
-                        "secret": item["secret"],
-                    })
-            logger.info(f"mtpro.xyz webproxy: {len(items)} записей")
+    # 2. Геолокация (для WEB — резолвим домен)
+    lookup_ip = ip
+    if proto == "WEB" and not is_white_ip(ip):
+        try:
+            lookup_ip = socket.gethostbyname(ip)
+        except Exception:
+            return None
 
-        # ── SOCKS5 ──
-        lines = await _get_text(s, SOCKS5_URL)
-        for line in lines:
-            p = _parse_socks5_line(line)
-            if p:
-                add(p)
+    geo = await geolocate(lookup_ip)
+    if not geo:
+        return None
 
-        # ── HTTP ──
-        lines = await _get_text(s, HTTP_URL)
-        for line in lines:
-            p = _parse_http_line(line)
-            if p:
-                add(p)
+    # 3. Белый IP (для WEB всегда False)
+    white = is_white_ip(lookup_ip) and proto != "WEB"
 
-    # Если основных источников мало — добираем из резервных
-    if len([p for p in result if p["protocol"] in ("SOCKS5", "HTTP")]) < 50:
-        async with aiohttp.ClientSession() as s:
-            for line in await _get_text(s, SOCKS5_FALLBACK):
-                p = _parse_socks5_line(line)
-                if p:
-                    add(p)
-            for line in await _get_text(s, HTTP_FALLBACK):
-                p = _parse_http_line(line)
-                if p:
-                    add(p)
-
-    from collections import Counter
-    stats = Counter(p["protocol"] for p in result)
-    logger.info(f"Итого: {dict(stats)}")
-    return result
+    raw.update({
+        "ping": f"{ping} ms",
+        "country": geo.get("country", "Unknown"),
+        "countryCode": geo.get("countryCode", ""),
+        "city": geo.get("city", "Unknown"),
+        "provider": geo.get("isp", "Unknown"),
+        "flag": country_flag(geo.get("countryCode", "")),
+        "is_white": white,
+        "id": abs(hash(f"{ip}:{port}")) % 10_000_000,
+    })
+    return raw
