@@ -28,7 +28,7 @@ MAX_SOCKS5_RATIO = 0.4
 MAX_WEB_COUNT = 2  # не более 2 WEB-прокси за раз (нестабильны)
 
 SEND_DELAY = 3          # пауза между отправками сообщений
-MAX_SEND_RETRIES = 3    # сколько раз повторять отправку при flood-control
+MAX_SEND_RETRIES = 3    # сколько раз повторять отправку при flood-control 
 
 
 async def check_with_semaphore(sem, raw):
