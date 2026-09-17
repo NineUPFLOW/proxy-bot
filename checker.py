@@ -10,10 +10,15 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
+# ─── ГЛУШИМ ЛОГИ TELETHON ──────────────────────────────────────────────
+for name in ("telethon", "telethon.network", "telethon.client",
+             "telethon.network.mtprotosender", "telethon.network.connection"):
+    logging.getLogger(name).setLevel(logging.CRITICAL)
+
 logger = logging.getLogger(__name__)
 
 MAX_PING_MS = 5000
-CHECK_TIMEOUT = 8
+CHECK_TIMEOUT = 5
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
@@ -21,7 +26,7 @@ TG_SESSION = os.environ.get("TG_SESSION")
 TEST_URL = "https://api.ipify.org?format=json"
 
 
-# ─── УТИЛИТЫ ────────────────────────────────────────────────────────────
+# ─── УТИЛИТЫ ───────────────────────────────────────────────────────────
 
 def is_white_ip(ip: str) -> bool:
     try:
@@ -56,49 +61,66 @@ def country_flag(code: str) -> str:
             + chr(0x1F1E6 + ord(code[1].upper()) - 65))
 
 
-# ─── ПРОВЕРКА MTProto / WEB (через Telethon) ────────────────────────────
+# ─── ПРОВЕРКА MTProto / WEB ────────────────────────────────────────────
 
 async def check_telegram_proxy(host: str, port: int, secret: str):
     """
-    Проверяет MTProto или WEB прокси через реальный handshake Telethon.
-    Возвращает пинг в мс или None, если прокси не работает.
+    Пытается подключиться к Telegram через прокси.
+    Возвращает пинг (мс) или None.
+    Оборачивает ВСЁ в try/except, включая фоновые задачи Telethon.
     """
-    client = TelegramClient(
-        StringSession(TG_SESSION) if TG_SESSION else None,
-        API_ID, API_HASH,
-        connection=ConnectionTcpMTProxyRandomizedIntermediate,
-        proxy=(host, int(port), secret),
-        timeout=CHECK_TIMEOUT,
-        connection_retries=1,
-    )
+    client = None
     try:
+        client = TelegramClient(
+            StringSession(TG_SESSION) if TG_SESSION else None,
+            API_ID, API_HASH,
+            connection=ConnectionTcpMTProxyRandomizedIntermediate,
+            proxy=(host, int(port), secret),
+            timeout=CHECK_TIMEOUT,
+            connection_retries=0,   # БЕЗ ретраев — иначе долго висит
+            retry_delay=0,
+            auto_reconnect=False,   # не пытаться переподключаться
+            request_retries=1,
+        )
         t0 = asyncio.get_event_loop().time()
-        await client.connect()
+
+        # Ограничиваем всё подключение жёстким таймаутом
+        await asyncio.wait_for(client.connect(), timeout=CHECK_TIMEOUT)
+
         if not client.is_connected():
             return None
-        await client(GetConfigRequest())
+
+        await asyncio.wait_for(client(GetConfigRequest()),
+                               timeout=CHECK_TIMEOUT)
         ping = int((asyncio.get_event_loop().time() - t0) * 1000)
-        await client.disconnect()
-        return ping if ping < MAX_PING_MS else None
-    except Exception as e:
-        logger.debug(f"Telethon proxy check failed {host}:{port}: {e}")
+
         try:
-            await client.disconnect()
+            await asyncio.wait_for(client.disconnect(), timeout=3)
         except Exception:
             pass
-        return None
+
+        return ping if ping < MAX_PING_MS else None
+
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+    except Exception:
+        pass
+    finally:
+        if client:
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=2)
+            except Exception:
+                pass
+    return None
 
 
-# ─── ПРОВЕРКА SOCKS5 / HTTP ─────────────────────────────────────────────
+# ─── ПРОВЕРКА SOCKS5 / HTTP ────────────────────────────────────────────
 
 async def check_socks5(host: str, port: int):
-    """Проверяет SOCKS5-прокси реальным HTTP-запросом через него."""
     try:
         connector = ProxyConnector(
             proxy_type=ProxyType.SOCKS5,
-            host=host,
-            port=int(port),
-            rdns=True,
+            host=host, port=int(port), rdns=True,
         )
         t0 = asyncio.get_event_loop().time()
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -108,42 +130,35 @@ async def check_socks5(host: str, port: int):
                 if resp.status == 200:
                     ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
                     return ping if ping < MAX_PING_MS else None
-    except Exception as e:
-        logger.debug(f"SOCKS5 check failed {host}:{port}: {e}")
+    except Exception:
+        pass
     return None
 
 
 async def check_http(host: str, port: int):
-    """Проверяет HTTP-прокси реальным HTTP-запросом через него."""
     try:
         proxy_url = f"http://{host}:{port}"
         t0 = asyncio.get_event_loop().time()
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                TEST_URL,
-                proxy=proxy_url,
+                TEST_URL, proxy=proxy_url,
                 timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
             ) as resp:
                 if resp.status == 200:
                     ping = round((asyncio.get_event_loop().time() - t0) * 1000, 1)
                     return ping if ping < MAX_PING_MS else None
-    except Exception as e:
-        logger.debug(f"HTTP check failed {host}:{port}: {e}")
+    except Exception:
+        pass
     return None
 
 
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def process_proxy(raw: dict):
-    """
-    Полный цикл: реальная проверка -> геолокация -> белый IP.
-    Возвращает обогащённый словарь или None, если прокси не работает.
-    """
     proto = raw["protocol"].upper()
     ip = raw["ip"]
     port = raw["port"]
 
-    # 1. Реальная проверка
     if proto in ("MTPROTO", "WEB"):
         ping = await check_telegram_proxy(ip, port, raw["secret"])
     elif proto == "SOCKS5":
@@ -156,7 +171,6 @@ async def process_proxy(raw: dict):
     if ping is None:
         return None
 
-    # 2. Геолокация (для WEB — резолвим домен)
     lookup_ip = ip
     if proto == "WEB" and not is_white_ip(ip):
         try:
@@ -168,7 +182,6 @@ async def process_proxy(raw: dict):
     if not geo:
         return None
 
-    # 3. Белый IP (для WEB всегда False)
     white = is_white_ip(lookup_ip) and proto != "WEB"
 
     raw.update({
