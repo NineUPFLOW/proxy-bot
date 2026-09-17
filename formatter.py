@@ -38,7 +38,6 @@ def format_message(p: dict) -> str:
     icon = PROTO_ICON.get(proto, "🔗")
     label = PROTO_LABEL.get(proto, proto)
 
-    # Пометка fake TLS для MTProto
     if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
         label += " · 🛡 Fake TLS"
 
@@ -52,8 +51,6 @@ def format_message(p: dict) -> str:
 
     if white:
         white_line = "├ ✅ <b>Белый IP:</b> Да · подтверждён\n"
-        if p.get("white_ips"):
-            white_line += f"├ 💎 <b>Белые IP:</b> {', '.join(p['white_ips'])}\n"
     else:
         white_line = "├ ⚪️ <b>Белый IP:</b> Нет\n"
 
