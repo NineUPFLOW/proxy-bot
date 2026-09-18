@@ -1,6 +1,6 @@
 """
-Проверка прокси. Принимает MTProto с любым типом secret.
-Fake-TLS (ee) — приоритет для РФ, остальные — тоже валидны.
+Проверка прокси с анализом probe_resistant.
+Оптимизировано: быстрая probe-проверка, кэш с лимитом.
 """
 
 import asyncio
@@ -27,43 +27,42 @@ for name in (
 logger = logging.getLogger(__name__)
 
 # ─── Лимиты ────────────────────────────────────────────────────────────
-MAX_PING_MS = 10000
-MAX_PING_WEB_MS = 8000
-CHECK_TIMEOUT = 10
-WEB_CHECK_TIMEOUT = 12
+MAX_PING_MS = 8000
+MAX_PING_WEB_MS = 6000
+CHECK_TIMEOUT = 8
+WEB_CHECK_TIMEOUT = 10
+PROBE_TIMEOUT = 5
 
 MT_ATTEMPTS = 3
 MT_REQUIRED = 2
 
-# ─── Приоритет протоколов (Fake TLS получает бонус) ────────────────────
+# ─── Скоринг ───────────────────────────────────────────────────────────
 def compute_score(proxy: dict) -> int:
     proto = proxy.get("protocol", "").upper()
-    secret = proxy.get("secret", "")
     ping = proxy.get("ping", 0)
+    probe = proxy.get("probe_resistant", False)
+    secret = proxy.get("secret", "")
 
     base = 0
     if proto == "MTPROTO":
         base = 10000
-        # Бонус за Fake TLS — он маскируется под HTTPS
         if secret.startswith("ee"):
             base += 3000
+        if probe:
+            base += 5000  # максимальный приоритет
     elif proto == "WEB":
         base = 5000
 
     return base - min(ping, 8000)
 
 
-# ─── Страны, подходящие для РФ ─────────────────────────────────────────
 ALLOWED_COUNTRIES = {
     "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
     "DE", "NL", "FI", "SE", "NO", "DK", "EE", "LV", "LT", "IS",
     "PL", "CZ", "SK", "AT", "CH", "FR", "BE", "GB", "IE", "LU",
     "IT", "ES", "PT", "RO", "BG", "RS", "HU", "HR", "SI", "GR", "CY", "MT",
-    "TR",
-    "US", "CA",
-    "JP", "KR", "SG", "HK",
+    "TR", "US", "CA", "JP", "KR", "SG", "HK",
 }
-
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -74,7 +73,10 @@ TEST_URL_RU = "https://ya.ru"
 
 _http_session: aiohttp.ClientSession | None = None
 _geo_cache: dict[str, dict] = {}
+_probe_cache: dict[str, bool] = {}
 _geo_semaphore = asyncio.Semaphore(5)
+
+PROBE_CACHE_LIMIT = 5000
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
@@ -153,7 +155,43 @@ async def geolocate(ip: str) -> dict:
     return {}
 
 
-def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
+# ═══════════════════════════════════════════════════════════════════════
+#  PROBE RESISTANCE TEST
+# ═══════════════════════════════════════════════════════════════════════
+
+async def check_probe_resistant(domain: str) -> bool:
+    """Проверяет, что домен-маска отдаёт реальный ответ (любой < 500)."""
+    if not domain:
+        return False
+    if domain in _probe_cache:
+        return _probe_cache[domain]
+
+    session = _get_http_session()
+    try:
+        async with session.get(
+            f"https://{domain}/",
+            timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
+            allow_redirects=False,
+            ssl=False,
+        ) as r:
+            is_real = r.status < 500
+    except Exception as e:
+        logger.debug("probe %s failed: %s", domain, e)
+        is_real = False
+
+    # Ограничиваем размер кэша
+    if len(_probe_cache) >= PROBE_CACHE_LIMIT:
+        _probe_cache.clear()
+
+    _probe_cache[domain] = is_real
+    return is_real
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ENRICH
+# ═══════════════════════════════════════════════════════════════════════
+
+def _enrich(proxy: dict, ip: str, ping: int, geo: dict, probe_ok: bool) -> dict | None:
     country_code = geo.get("countryCode", "")
     if country_code and country_code not in ALLOWED_COUNTRIES:
         logger.debug("Отсев по стране: %s (%s)", ip, country_code)
@@ -168,12 +206,15 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
         "city": geo.get("city", "Unknown"),
         "provider": geo.get("isp", "Unknown"),
         "flag": _country_flag(country_code),
+        "probe_resistant": probe_ok,
     })
     proxy["score"] = compute_score(proxy)
     return proxy
 
 
-# ─── MTProto / WEB ─────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#  MTProto / WEB
+# ═══════════════════════════════════════════════════════════════════════
 
 async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
     client = None
@@ -212,7 +253,6 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
-    """MTProto/WEB: 3 попытки, нужно 2. Любой secret принимается."""
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
@@ -241,11 +281,18 @@ async def check_mtproto(proxy: dict) -> dict | None:
     if avg_ping > limit:
         return None
 
+    # probe resistance — только для MTProto с доменом-маской
+    probe_ok = False
+    if not is_web and proxy.get("mask_domain"):
+        probe_ok = await check_probe_resistant(proxy["mask_domain"])
+
     geo = await geolocate(ip)
-    return _enrich(proxy, ip, avg_ping, geo)
+    return _enrich(proxy, ip, avg_ping, geo, probe_ok)
 
 
-# ─── SOCKS5 ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#  SOCKS5
+# ═══════════════════════════════════════════════════════════════════════
 
 async def check_socks5(proxy: dict) -> dict | None:
     host = proxy["ip"]
@@ -293,7 +340,7 @@ async def check_socks5(proxy: dict) -> dict | None:
             return None
 
         geo = await geolocate(ip)
-        return _enrich(proxy, ip, ping, geo)
+        return _enrich(proxy, ip, ping, geo, probe_ok=False)
     except Exception as e:
         logger.debug("socks5 %s:%s — %s", ip, port, e)
         return None
@@ -304,13 +351,14 @@ async def check_socks5(proxy: dict) -> dict | None:
             pass
 
 
-# ─── Главная функция ───────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#  ГЛАВНАЯ ФУНКЦИЯ
+# ═══════════════════════════════════════════════════════════════════════
 
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
 
     if proto == "MTPROTO":
-        # Принимаем ЛЮБОЙ валидный secret (не только ee)
         if not raw.get("secret"):
             return None
         return await check_mtproto(raw)
