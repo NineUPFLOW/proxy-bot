@@ -1,6 +1,6 @@
 """
-Сбор прокси из указанных Telegram-источников.
-Парсер читает и текст сообщений, и inline-кнопки.
+Сбор прокси из Telegram-источников.
+Читает и текст сообщений, и inline-кнопки.
 """
 
 import asyncio
@@ -15,7 +15,6 @@ from telethon.errors import FloodWaitError, ChannelPrivateError
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ (только указанные) ─────────────────────────────────────
 TELEGRAM_SOURCES = [
     "urlsources",
     "strbypass",
@@ -43,10 +42,7 @@ def _init_telegram_env():
         TG_SESSION = os.environ.get("TG_SESSION")
 
 
-# ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
-
 def _parse_tg_proxy(line: str):
-    """tg://proxy?server=...&port=...&secret=ee... → MTProto (Fake TLS)."""
     try:
         params = parse_qs(urlparse(line).query)
         server = params.get("server", [None])[0]
@@ -68,7 +64,6 @@ def _parse_tg_proxy(line: str):
 
 
 def _parse_tg_socks(line: str):
-    """tg://socks?server=...&port=... → SOCKS5."""
     try:
         params = parse_qs(urlparse(line).query)
         server = params.get("server", [None])[0]
@@ -86,7 +81,6 @@ def _parse_tg_socks(line: str):
 
 
 def _parse_tg_webproxy(line: str):
-    """tg://webproxy?server=...&secret=dd... → WEB (TgWebProxy)."""
     try:
         params = parse_qs(urlparse(line).query)
         server = params.get("server", [None])[0]
@@ -108,7 +102,6 @@ def _parse_tg_webproxy(line: str):
 
 
 def _parse_socks5_uri(line: str):
-    """socks5://user:pass@ip:port → SOCKS5."""
     try:
         parsed = urlparse(line)
         if parsed.scheme not in ("socks5", "socks"):
@@ -128,7 +121,6 @@ def _parse_socks5_uri(line: str):
 
 
 def _parse_bare_socks5(line: str):
-    """ip:port → SOCKS5 (из текста сообщений)."""
     line = line.strip()
     if line.count(":") != 1:
         return None
@@ -154,7 +146,6 @@ def _parse_bare_socks5(line: str):
 
 
 def _extract_from_token(token: str):
-    """Извлекает прокси из одного токена/строки."""
     token = token.strip().strip("`<>\"'")
     if not token:
         return None
@@ -170,7 +161,6 @@ def _extract_from_token(token: str):
 
 
 def _extract_proxies_from_text(text: str) -> list:
-    """Извлекает все прокси из текста (markdown, обычный текст)."""
     if not text:
         return []
     result = []
@@ -196,7 +186,6 @@ def _extract_proxies_from_text(text: str) -> list:
 
 
 def _extract_proxies_from_markup(msg) -> list:
-    """Извлекает прокси из inline-кнопок."""
     if not msg.reply_markup:
         return []
     result = []
@@ -214,8 +203,6 @@ def _extract_proxies_from_markup(msg) -> list:
         logger.debug("markup parse error: %s", e)
     return result
 
-
-# ─── ПАРСИНГ ИСТОЧНИКОВ ────────────────────────────────────────────────
 
 async def _fetch_from_source(client: TelegramClient, source: str) -> list:
     result = []
@@ -300,8 +287,6 @@ async def fetch_from_telegram_sources() -> list:
     logger.info("Из Telegram-источников собрано: %s", len(result))
     return result
 
-
-# ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def fetch_all_proxies() -> list:
     result = []
