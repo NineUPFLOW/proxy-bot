@@ -1,11 +1,13 @@
 """
 Сбор прокси из Telegram-источников.
-Принимает MTProto с любым типом secret (ee, hex, base64).
+- Regex-парсинг markdown и HTML-ссылок
+- Анализ Secret: извлечение домена-маски, probe_resistant
 """
 
 import asyncio
 import logging
 import os
+import re
 from collections import Counter
 from urllib.parse import urlparse, parse_qs
 
@@ -18,73 +20,134 @@ logger = logging.getLogger(__name__)
 
 # ─── ИСТОЧНИКИ ─────────────────────────────────────────────────────────
 TELEGRAM_SOURCES = [
-    "TProxyRU",
-    "ProxyMTProto",
-    "MProxyFree",
-    "vnespiska",
-    "Proxy_tm_unlimited",
-    "KVN_ot_RKN",
-    "telemt_free_proxy",
-    "proxy_first_ru",
-    "MTProto34",
-    "mtpro_xyz",
-    "proxy_telegramt",
-    "urlsources",
-    "strbypass",
-    "PODVAL_MIX",
-    "razlo4ka7",
-    "FreeLifeForum",
-    "RaViraNet",
+    "TProxyRU", "ProxyMTProto", "MProxyFree", "vnespiska",
+    "Proxy_tm_unlimited", "KVN_ot_RKN", "telemt_free_proxy",
+    "proxy_first_ru", "MTProto34", "mtpro_xyz", "proxy_telegramt",
+    "urlsources", "strbypass", "PODVAL_MIX", "razlo4ka7",
+    "FreeLifeForum", "RaViraNet",
 ]
 
 MESSAGES_LIMIT = 100
 SOURCE_TIMEOUT = 30
-SOURCE_DELAY = 3
+SOURCE_DELAY = 2
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
+
+# ─── Regex для извлечения URL из текста ────────────────────────────────
+RE_MARKDOWN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+RE_HTML_HREF = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+RE_TG_URL = re.compile(
+    r"(tg://proxy[^\s<>\"'\)\]]+|t\.me/proxy[^\s<>\"'\)\]]+"
+    r"|tg://socks[^\s<>\"'\)\]]+|t\.me/socks[^\s<>\"'\)\]]+"
+    r"|tg://webproxy[^\s<>\"'\)\]]+|t\.me/webproxy[^\s<>\"'\)\]]+"
+    r"|socks5://[^\s<>\"'\)\]]+|socks://[^\s<>\"'\)\]]+)"
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  АНАЛИЗ SECRET
+# ═══════════════════════════════════════════════════════════════════════
+
+HEX_CHARS = set("0123456789abcdefABCDEF")
+
+
+def _extract_domain_from_secret(secret: str) -> str | None:
+    """Извлекает домен-маску из ee-секрета. Возвращает None при ошибке."""
+    if not secret.startswith("ee") or len(secret) < 36:
+        return None
+
+    rest = secret[2:]
+    if len(rest) < 34:
+        return None
+
+    domain_hex = rest[32:]
+    if not domain_hex or len(domain_hex) % 2 != 0:
+        return None
+    if not all(c in HEX_CHARS for c in domain_hex):
+        return None
+
+    try:
+        domain_bytes = bytes.fromhex(domain_hex)
+        domain = domain_bytes.decode("ascii", errors="ignore").strip("\x00")
+        if "." in domain and 3 < len(domain) < 100 and " " not in domain:
+            return domain
+    except (ValueError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def analyze_secret(proxy: dict):
+    """Анализирует secret MTProto: маска домена, fake TLS, probe_resistant."""
+    secret = proxy.get("secret", "")
+    proxy["mask_domain"] = None
+    proxy["has_fake_tls"] = secret.startswith("ee")
+    proxy["probe_resistant"] = False
+
+    if proxy["has_fake_tls"]:
+        domain = _extract_domain_from_secret(secret)
+        if domain:
+            proxy["mask_domain"] = domain
+            proxy["probe_resistant"] = True  # уточнится в checker
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  ПАРСЕРЫ
 # ═══════════════════════════════════════════════════════════════════════
 
+def _parse_qs_safe(query: str) -> dict:
+    """parse_qs с защитой base64-плюсов и без превращения в пробел."""
+    return parse_qs(query.replace("+", "%2B"))
+
+
 def _parse_tg_proxy(line: str):
-    """tg://proxy?server=...&port=...&secret=... → MTProto (любой secret)."""
     try:
-        params = parse_qs(urlparse(line).query)
+        params = _parse_qs_safe(urlparse(line).query)
         server = params.get("server", [None])[0]
         port = params.get("port", [None])[0]
         secret = params.get("secret", [None])[0]
         if not all([server, port, secret]):
             return None
-        # Отсеиваем WEB (dd) — он парсится отдельно
         if secret.startswith("dd"):
             return None
-        return {
+        try:
+            port_int = int(port)
+            if not (1 <= port_int <= 65535):
+                return None
+        except ValueError:
+            return None
+
+        proxy = {
             "protocol": "MTPROTO",
             "ip": server,
-            "port": int(port),
+            "port": port_int,
             "secret": secret,
             "raw": line,
         }
+        analyze_secret(proxy)
+        return proxy
     except Exception:
         return None
 
 
 def _parse_tg_socks(line: str):
-    """tg://socks?server=...&port=... → SOCKS5."""
     try:
-        params = parse_qs(urlparse(line).query)
+        params = _parse_qs_safe(urlparse(line).query)
         server = params.get("server", [None])[0]
         port = params.get("port", [None])[0]
         if not all([server, port]):
             return None
+        try:
+            port_int = int(port)
+            if not (1 <= port_int <= 65535):
+                return None
+        except ValueError:
+            return None
         return {
             "protocol": "SOCKS5",
             "ip": server,
-            "port": int(port),
+            "port": port_int,
             "raw": line,
         }
     except Exception:
@@ -92,20 +155,21 @@ def _parse_tg_socks(line: str):
 
 
 def _parse_tg_webproxy(line: str):
-    """tg://webproxy?server=...&secret=dd... → WEB (TgWebProxy)."""
     try:
-        params = parse_qs(urlparse(line).query)
+        params = _parse_qs_safe(urlparse(line).query)
         server = params.get("server", [None])[0]
         secret = params.get("secret", [None])[0]
-        port = params.get("port", ["443"])[0]
-        if not all([server, secret]):
+        if not all([server, secret]) or not secret.startswith("dd"):
             return None
-        if not secret.startswith("dd"):
-            return None
+        port_raw = params.get("port", ["443"])[0]
+        try:
+            port = int(port_raw) if port_raw else 443
+        except ValueError:
+            port = 443
         return {
             "protocol": "WEB",
             "ip": server,
-            "port": int(port) if port else 443,
+            "port": port,
             "secret": secret,
             "raw": line,
         }
@@ -114,7 +178,6 @@ def _parse_tg_webproxy(line: str):
 
 
 def _parse_socks5_uri(line: str):
-    """socks5://user:pass@ip:port → SOCKS5."""
     try:
         parsed = urlparse(line)
         if parsed.scheme not in ("socks5", "socks"):
@@ -134,14 +197,13 @@ def _parse_socks5_uri(line: str):
 
 
 def _parse_bare_socks5(line: str):
-    """ip:port → SOCKS5 (из текста сообщений)."""
     line = line.strip()
     if line.count(":") != 1:
         return None
     try:
         ip, port = line.rsplit(":", 1)
-        port = int(port)
-        if not (1 <= port <= 65535):
+        port_int = int(port)
+        if not (1 <= port_int <= 65535):
             return None
         parts = ip.split(".")
         if len(parts) != 4:
@@ -152,7 +214,7 @@ def _parse_bare_socks5(line: str):
         return {
             "protocol": "SOCKS5",
             "ip": ip,
-            "port": port,
+            "port": port_int,
             "raw": line,
         }
     except (ValueError, AttributeError):
@@ -160,8 +222,8 @@ def _parse_bare_socks5(line: str):
 
 
 def _extract_from_token(token: str):
-    """Извлекает прокси из одного токена/строки."""
-    token = token.strip().strip("`<>\"'")
+    """Извлекает прокси из одного токена."""
+    token = token.strip().strip("`<>\"'()[]{}")
     if not token:
         return None
     if "tg://proxy" in token or "t.me/proxy" in token:
@@ -176,26 +238,53 @@ def _extract_from_token(token: str):
 
 
 def _extract_proxies_from_text(text: str) -> list:
-    """Извлекает все прокси из текста (markdown, обычный текст)."""
+    """
+    Извлекает все прокси из текста через regex.
+    Обрабатывает: markdown [t](url), html <a href>, обычные ссылки.
+    """
     if not text:
         return []
+
     result = []
-    text = text.replace("`", "").replace("</a>", "")
+    seen_urls = set()
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-
-        for token in line.split():
-            p = _extract_from_token(token)
+    # 1. Markdown-ссылки [text](url)
+    for match in RE_MARKDOWN.finditer(text):
+        url = match.group(2).strip()
+        if url not in seen_urls:
+            seen_urls.add(url)
+            p = _extract_from_token(url)
             if p:
                 result.append(p)
 
-        # Fallback: bare ip:port в строках без ссылок
-        if not any(s in line for s in ("tg://", "t.me/", "socks5://", "socks://")):
+    # 2. HTML href
+    for match in RE_HTML_HREF.finditer(text):
+        url = match.group(1).strip()
+        if url not in seen_urls:
+            seen_urls.add(url)
+            p = _extract_from_token(url)
+            if p:
+                result.append(p)
+
+    # 3. Голые ссылки
+    for match in RE_TG_URL.finditer(text):
+        url = match.group(1).strip()
+        if url not in seen_urls:
+            seen_urls.add(url)
+            p = _extract_from_token(url)
+            if p:
+                result.append(p)
+
+    # 4. Fallback: ip:port (без ссылок)
+    if not result:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if any(s in line for s in ("tg://", "t.me/", "socks5://", "socks://")):
+                continue
             for word in line.split():
-                p = _parse_bare_socks5(word)
+                p = _parse_bare_socks5(word.strip("`<>\"'()[]{}"))
                 if p:
                     result.append(p)
 
@@ -227,7 +316,6 @@ def _extract_proxies_from_markup(msg) -> list:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _fetch_from_source(client: TelegramClient, source: str) -> list:
-    """Читает последние сообщения из источника: и текст, и кнопки."""
     result = []
     try:
         try:
@@ -236,12 +324,16 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
             logger.debug("Источник @%s приватный, пропускаем", source)
             return result
         except Exception:
-            pass  # уже подписаны
+            pass
 
-        messages = await asyncio.wait_for(
-            client.get_messages(source, limit=MESSAGES_LIMIT),
-            timeout=SOURCE_TIMEOUT,
-        )
+        try:
+            messages = await asyncio.wait_for(
+                client.get_messages(source, limit=MESSAGES_LIMIT),
+                timeout=SOURCE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при чтении @%s", source)
+            return result
 
         from_text = 0
         from_markup = 0
@@ -262,15 +354,12 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
     except FloodWaitError as e:
         logger.warning("FloodWait для @%s: %ss", source, e.seconds)
         await asyncio.sleep(min(e.seconds, 60))
-    except asyncio.TimeoutError:
-        logger.warning("Таймаут при чтении @%s", source)
     except Exception as e:
         logger.warning("Ошибка чтения @%s: %s", source, e)
     return result
 
 
 async def fetch_from_telegram_sources() -> list:
-    """Парсит прокси из Telegram-источников через userbot."""
     if not TG_SESSION:
         logger.warning("TG_SESSION не задан, парсинг пропущен")
         return []
@@ -288,7 +377,15 @@ async def fetch_from_telegram_sources() -> list:
         )
         await client.connect()
 
-        if not await client.is_user_authorized():
+        try:
+            authorized = await asyncio.wait_for(
+                client.is_user_authorized(), timeout=15
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут is_user_authorized")
+            return []
+
+        if not authorized:
             logger.warning("TG_SESSION не авторизована")
             return []
 
@@ -315,7 +412,6 @@ async def fetch_from_telegram_sources() -> list:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def fetch_all_proxies() -> list:
-    """Собирает прокси из всех источников."""
     result = []
     seen = set()
 
