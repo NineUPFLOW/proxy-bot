@@ -1,6 +1,6 @@
 """
-Проверка прокси. Приоритет — MTProto для РФ.
-Увеличенные таймауты для медленных GitHub-раннеров.
+Проверка прокси и оценка качества.
+Поддерживает MTProto, SOCKS5, WEB.
 """
 
 import asyncio
@@ -26,15 +26,30 @@ for name in (
 
 logger = logging.getLogger(__name__)
 
-# ─── Лимиты (увеличены для медленных раннеров) ─────────────────────────
+# ─── Лимиты ────────────────────────────────────────────────────────────
 MAX_PING_MS = 12000
 MAX_PING_WEB_MS = 6000
 CHECK_TIMEOUT = 10
 WEB_CHECK_TIMEOUT = 12
 
-# ─── Параметры MTProto-проверки ────────────────────────────────────────
-MT_ATTEMPTS = 5          # 5 попыток
-MT_REQUIRED = 2          # нужно 2 успешных
+MT_ATTEMPTS = 3
+MT_REQUIRED = 2
+
+# ─── Оценка качества ───────────────────────────────────────────────────
+PROTO_BONUS = {
+    "MTPROTO": 2000,   # приоритет для РФ
+    "WEB": 1000,       # работает в РФ
+    "SOCKS5": 0,       # блокируется ТСПУ
+}
+
+
+def compute_score(proxy: dict) -> int:
+    """Скоринг: чем больше — тем лучше."""
+    proto = proxy.get("protocol", "").upper()
+    bonus = PROTO_BONUS.get(proto, 0)
+    ping = proxy.get("ping", 0)
+    return bonus - ping
+
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -135,10 +150,12 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict:
         "provider": geo.get("isp", "Unknown"),
         "flag": _country_flag(geo.get("countryCode", "")),
     })
+    proxy["score"] = compute_score(proxy)
     return proxy
 
 
-# ─── MTProto ───────────────────────────────────────────────────────────
+# ─── MTProto / WEB ─────────────────────────────────────────────────────
+
 async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
     client = None
     try:
@@ -176,7 +193,7 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
-    """5 попыток, нужно 2 успешных. Медленные прокси больше не отсеиваются."""
+    """Для MTProto и WEB: 3 попытки, нужно 2 успешных."""
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
@@ -193,13 +210,17 @@ async def check_mtproto(proxy: dict) -> dict | None:
             if len(pings) >= MT_REQUIRED:
                 break
         if attempt < MT_ATTEMPTS - 1:
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.3)
 
     if len(pings) < MT_REQUIRED:
         return None
 
     avg_ping = sum(pings) // len(pings)
-    if avg_ping > MAX_PING_MS:
+
+    # Разные лимиты для MTProto и WEB
+    is_web = proxy["protocol"].upper() == "WEB"
+    limit = MAX_PING_WEB_MS if is_web else MAX_PING_MS
+    if avg_ping > limit:
         return None
 
     geo = await geolocate(ip)
@@ -207,6 +228,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
 
 
 # ─── SOCKS5 ────────────────────────────────────────────────────────────
+
 async def check_socks5(proxy: dict) -> dict | None:
     host = proxy["ip"]
     port = int(proxy["port"])
@@ -264,11 +286,18 @@ async def check_socks5(proxy: dict) -> dict | None:
             pass
 
 
+# ─── Главная функция ───────────────────────────────────────────────────
+
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
 
     if proto == "MTPROTO":
         if not raw.get("secret", "").startswith("ee"):
+            return None
+        return await check_mtproto(raw)
+
+    if proto == "WEB":
+        if not raw.get("secret", "").startswith("dd"):
             return None
         return await check_mtproto(raw)
 
