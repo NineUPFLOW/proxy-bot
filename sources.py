@@ -2,7 +2,6 @@
 Сбор прокси из Telegram-источников.
 Читает и текст сообщений, и inline-кнопки (в каналах, группах, супергруппах).
 """
-
 import asyncio
 import logging
 from collections import Counter
@@ -299,7 +298,7 @@ async def fetch_from_telegram_sources() -> list:
         )
         await client.connect()
 
-        if not await client.is_user_authorized():
+        if not await is_user_authorized():  # <--- добавлено
             logger.warning("TG_SESSION не авторизована")
             return []
 
@@ -319,6 +318,15 @@ async def fetch_from_telegram_sources() -> list:
 
     logger.info("Из Telegram-источников собрано: %s", len(result))
     return result
+
+
+async def is_user_authorized() -> bool:
+    """Проверяет, авторизован ли пользователь в Telegram."""
+    try:
+        await client.get_me()
+        return True
+    except Exception:
+        return False
 
 
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
