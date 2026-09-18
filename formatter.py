@@ -1,8 +1,6 @@
 """
 Оформление сообщений с прокси.
 """
-# from html import escape  # <--- удалено (не используется)
-
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
@@ -34,7 +32,7 @@ def format_message(p: dict) -> str:
     return (
         f"🔗 <b>#{pid}</b>: {flag} <b>{country}</b>\n"
         f"\n"
-        f"┌ ✅ <b>Название:</b> {flag} {country}\n"
+        f"┌ ✅ <b>Название:</b> {flag} <b>{country}</b>\n"
         f"├ 🔗 <b>Протокол:</b> {proto}\n"
         f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
         f"├ 📍 <b>Страна:</b> {flag} {country}\n"
