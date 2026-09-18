@@ -31,13 +31,20 @@ def format_message(p: dict) -> str:
     ip_display = escape(str(p.get("ip", "")))
     ping = int(p.get("ping", 0))
     pid = p.get("id", 0)
+    secret = p.get("secret", "")
+
+    # Пометка Fake TLS
+    proto_label = proto
+    if proto == "MTPROTO" and secret.startswith("ee"):
+        proto_label = "MTProto · 🛡 Fake TLS"
 
     return (
-        f"🔗 <b>#{pid}</b>: {flag} <b>{country}</b>\n"
+        f"🔗 <b>#{pid}</b> | {flag} <b>{country}</b>\n"
         f"\n"
         f"┌ ✅ <b>Название:</b> {flag} {country}\n"
-        f"├ 🔗 <b>Протокол:</b> {proto}\n"
+        f"├ 🔗 <b>Протокол:</b> {proto_label}\n"
         f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
+        f"├ ✅ <b>Белый IP:</b> Нет\n"
         f"├ 📍 <b>Страна:</b> {flag} {country}\n"
         f"├ 📍 <b>Город:</b> {city}\n"
         f"├ 🏠 <b>Провайдер:</b> {provider}\n"
