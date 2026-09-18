@@ -1,7 +1,6 @@
 """
-Проверка прокси. Приоритет — MTProto для РФ.
-Увеличенные таймауты для GitHub runner.
-Кэш геолокации, retry при 429.
+Проверка прокси. Ужесточённые лимиты.
+Фильтр по странам, подходящим для РФ.
 """
 
 import asyncio
@@ -27,19 +26,33 @@ for name in (
 
 logger = logging.getLogger(__name__)
 
-# ─── Лимиты ────────────────────────────────────────────────────────────
-MAX_PING_MS = 8000
-MAX_PING_WEB_MS = 5000
-CHECK_TIMEOUT = 8
-WEB_CHECK_TIMEOUT = 10
+# ─── Лимиты (ужесточены) ───────────────────────────────────────────────
+MAX_PING_MS = 2500              # было 8000 — теперь отсеиваем медленные
+MAX_PING_WEB_MS = 2000
+CHECK_TIMEOUT = 6               # было 8
+WEB_CHECK_TIMEOUT = 8
 
 MT_ATTEMPTS = 3
-MT_REQUIRED = 2
+MT_REQUIRED = 3                 # было 2 — теперь требуем все 3 успешных
 
 PROTO_BONUS = {
     "MTPROTO": 10000,
     "WEB": 5000,
     "SOCKS5": 0,
+}
+
+# ─── Страны, подходящие для РФ (Европа + СНГ + Турция + Кавказ) ───────
+ALLOWED_COUNTRIES = {
+    # СНГ
+    "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
+    # Северная Европа
+    "DE", "NL", "FI", "SE", "NO", "DK", "EE", "LV", "LT", "IS",
+    # Центральная и Западная Европа
+    "PL", "CZ", "SK", "AT", "CH", "FR", "BE", "GB", "IE", "LU",
+    # Южная и Восточная Европа
+    "IT", "ES", "PT", "RO", "BG", "RS", "HU", "HR", "SI", "GR", "CY", "MT",
+    # Турция и Ближний Восток
+    "TR",
 }
 
 
@@ -138,20 +151,27 @@ async def geolocate(ip: str) -> dict:
     return {}
 
 
-def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict:
+def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
+    country_code = geo.get("countryCode", "")
+    if country_code not in ALLOWED_COUNTRIES:
+        logger.debug("Отсев по стране: %s (%s)", ip, country_code)
+        return None
+
     proxy.update({
         "ip": ip,
         "ping": ping,
         "id": _stable_id(ip, proxy["port"]),
         "country": geo.get("country", "Unknown"),
-        "countryCode": geo.get("countryCode", ""),
+        "countryCode": country_code,
         "city": geo.get("city", "Unknown"),
         "provider": geo.get("isp", "Unknown"),
-        "flag": _country_flag(geo.get("countryCode", "")),
+        "flag": _country_flag(country_code),
     })
     proxy["score"] = compute_score(proxy)
     return proxy
 
+
+# ─── MTProto / WEB ─────────────────────────────────────────────────────
 
 async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
     client = None
@@ -203,8 +223,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
         ping = await _one_mtproto_attempt(ip, port, secret)
         if ping is not None:
             pings.append(ping)
-            if len(pings) >= MT_REQUIRED:
-                break
         if attempt < MT_ATTEMPTS - 1:
             await asyncio.sleep(0.3)
 
@@ -221,6 +239,8 @@ async def check_mtproto(proxy: dict) -> dict | None:
     geo = await geolocate(ip)
     return _enrich(proxy, ip, avg_ping, geo)
 
+
+# ─── SOCKS5 ────────────────────────────────────────────────────────────
 
 async def check_socks5(proxy: dict) -> dict | None:
     host = proxy["ip"]
@@ -278,6 +298,8 @@ async def check_socks5(proxy: dict) -> dict | None:
         except Exception:
             pass
 
+
+# ─── Главная функция ───────────────────────────────────────────────────
 
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
