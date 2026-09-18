@@ -1,31 +1,7 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-.venv/
-ENV/
-
-# Env
+*.pyc
+*.pyo
 .env
-.env.*
-
-# Telethon
-*.session
-*.session-journal
 session/
-
-# State
+*.session
 seen.json
-
-# IDE
-.idea/
-.vscode/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
