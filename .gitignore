@@ -26,7 +26,7 @@ session/
 *.session
 *.session-journal
 
-# ─── Bot state (состояние генерируется автоматически) ───────────────
+# ─── Bot state (генерируется автоматически) ─────────────────────────
 proxy_state.db
 proxy_state.db-wal
 proxy_state.db-shm
