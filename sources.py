@@ -32,7 +32,11 @@ LONEKING_MT_URL = "https://raw.githubusercontent.com/LoneKingCode/free-proxy-db/
 # ─── Загрузчики ────────────────────────────────────────────────────────
 async def _get_text(session, url):
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20), headers=HEADERS) as r:
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=20),
+            headers=HEADERS,
+        ) as r:
             if r.status == 200:
                 text = await r.text()
                 return [l.strip() for l in text.splitlines() if l.strip()]
@@ -44,7 +48,11 @@ async def _get_text(session, url):
 
 async def _get_json(session, url):
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20), headers=HEADERS) as r:
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=20),
+            headers=HEADERS,
+        ) as r:
             if r.status == 200:
                 return await r.json()
             logger.warning("JSON fetch %s: HTTP %s", url, r.status)
@@ -110,17 +118,19 @@ def _parse_socks5_line(line: str):
 # ─── Основная функция ──────────────────────────────────────────────────
 async def fetch_all_proxies():
     """Собирает прокси из всех источников с учётом статистики."""
-    # Получаем список рабочих источников
     working_sources = state.get_working_sources(min_success_rate=0.005)
     if not working_sources:
-        working_sources = MTPROTO_URLS + [RU_MTPROTO_URL] + SOCKS5_URLS + [WEB_PROXY_URL, LONEKING_MT_URL]
+        working_sources = (
+            MTPROTO_URLS + [RU_MTPROTO_URL] + SOCKS5_URLS
+            + [WEB_PROXY_URL, LONEKING_MT_URL]
+        )
 
     all_proxies = []
 
     async with aiohttp.ClientSession() as session:
         # ─── MTProto ───
         for url in MTPROTO_URLS + [RU_MTPROTO_URL]:
-            if url not in working_sources and working_sources:
+            if working_sources and url not in working_sources:
                 continue
             lines = await _get_text(session, url)
             if not lines:
@@ -129,11 +139,14 @@ async def fetch_all_proxies():
             parsed = [p for p in (_parse_tg_link(l) for l in lines) if p]
             state.update_source_stats(url, len(lines), len(parsed))
             all_proxies.extend(parsed)
-            logger.info("MTProto %s: %s → %s", url.split("/")[-1], len(lines), len(parsed))
+            logger.info(
+                "MTProto %s: %s → %s",
+                url.split("/")[-1], len(lines), len(parsed),
+            )
 
         # ─── SOCKS5 ───
         for url in SOCKS5_URLS:
-            if url not in working_sources and working_sources:
+            if working_sources and url not in working_sources:
                 continue
             lines = await _get_text(session, url)
             if not lines:
@@ -142,35 +155,40 @@ async def fetch_all_proxies():
             parsed = [p for p in (_parse_socks5_line(l) for l in lines) if p]
             state.update_source_stats(url, len(lines), len(parsed))
             all_proxies.extend(parsed)
-            logger.info("SOCKS5 %s: %s → %s", url.split("/")[-1], len(lines), len(parsed))
+            logger.info(
+                "SOCKS5 %s: %s → %s",
+                url.split("/")[-1], len(lines), len(parsed),
+            )
 
         # ─── WEB ───
-        if WEB_PROXY_URL in working_sources or not working_sources:
+        if not working_sources or WEB_PROXY_URL in working_sources:
             data = await _get_json(session, WEB_PROXY_URL)
             if data:
                 parsed = []
-                for item in data if isinstance(data, list) else data.get("proxies", []):
+                items = data if isinstance(data, list) else data.get("proxies", [])
+                for item in items:
                     raw = item.get("link") or item.get("url") or ""
                     p = _parse_tg_link(raw)
                     if p:
                         parsed.append(p)
-                state.update_source_stats(WEB_PROXY_URL, len(data), len(parsed))
+                state.update_source_stats(WEB_PROXY_URL, len(items), len(parsed))
                 all_proxies.extend(parsed)
-                logger.info("WEB: %s → %s", len(data), len(parsed))
+                logger.info("WEB: %s → %s", len(items), len(parsed))
 
         # ─── LoneKing MTProto (JSON) ───
-        if LONEKING_MT_URL in working_sources or not working_sources:
+        if not working_sources or LONEKING_MT_URL in working_sources:
             data = await _get_json(session, LONEKING_MT_URL)
             if data:
                 parsed = []
-                for item in data if isinstance(data, list) else []:
+                items = data if isinstance(data, list) else []
+                for item in items:
                     raw = item.get("link") or item.get("url") or ""
                     p = _parse_tg_link(raw)
                     if p:
                         parsed.append(p)
-                state.update_source_stats(LONEKING_MT_URL, len(data), len(parsed))
+                state.update_source_stats(LONEKING_MT_URL, len(items), len(parsed))
                 all_proxies.extend(parsed)
-                logger.info("LoneKing: %s → %s", len(data), len(parsed))
+                logger.info("LoneKing: %s → %s", len(items), len(parsed))
 
     logger.info("Всего собрано: %s", len(all_proxies))
     return all_proxies
