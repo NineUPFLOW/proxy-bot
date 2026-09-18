@@ -1,11 +1,11 @@
 """
 Точка входа. Запускает полный цикл:
-1. Сбор прокси из источников (MTProto + SOCKS5)
-2. Дедупликация в батче
+1. Сбор прокси из источников (MTProto + SOCKS5 + WEB)
+2. Лимит на сканирование: MTProto — все, SOCKS5 — минимум, WEB — если есть
 3. Фильтрация уже просканированных (seen)
 4. Проверка новых
 5. Фильтрация уже опубликованных
-6. Публикация лучших
+6. Публикация с приоритетом MTProto
 """
 
 import asyncio
@@ -33,7 +33,6 @@ logging.basicConfig(
     force=True,
 )
 
-# Глушим шумные логгеры
 for noisy in (
     "telethon", "telethon.network", "telethon.client",
     "telethon.network.mtprotosender", "telethon.network.connection",
@@ -49,21 +48,26 @@ logger = logging.getLogger("bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
+# ─── Публикация ───
 PUBLISH_COUNT = 5
-CONCURRENCY = 20
-MAX_SOCKS5_RATIO = 0.4
+MAX_SOCKS5_PUBLISH = 1        # максимум 1 SOCKS5 из 5 публикуемых
+MAX_WEB_PUBLISH = 2           # максимум 2 WEB из 5 публикуемых
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
 
+# ─── Проверка ───
+CONCURRENCY = 20
+
+# ─── Лимиты на сканирование за один запуск ───
+MAX_MT_CHECK = 200            # MTProto — все, но с запасом
+MAX_SOCKS5_CHECK = 20         # SOCKS5 — минимум (блокируется ТСПУ)
+MAX_WEB_CHECK = 30            # WEB — если есть в источниках
+
 
 # ═══════════════════════════════════════════════════════════════════════
-# Проверка прокси с ограничением параллелизма
+# Проверка одного прокси
 # ═══════════════════════════════════════════════════════════════════════
 async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
-    """
-    Проверяет один прокси. Успешно прошедшие проверку сразу
-    помечаются как seen, чтобы больше не сканироваться.
-    """
     async with sem:
         try:
             result = await process_proxy(raw)
@@ -79,7 +83,6 @@ async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
 # Отправка с retry
 # ═══════════════════════════════════════════════════════════════════════
 async def send_with_retry(bot: Bot, p: dict) -> bool:
-    """Отправляет сообщение с прокси, учитывая flood-control Telegram."""
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
             await bot.send_message(
@@ -122,14 +125,14 @@ async def run(bot: Bot):
     state.init_db()
     state.cleanup()
 
-    # ─── 1. Сбор прокси ───
+    # ─── 1. Сбор ───
     logger.info("Сбор прокси из источников...")
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
         return
 
-       # ─── 2. Дедупликация внутри батча ───
+    # ─── 2. Дедупликация внутри батча ───
     seen_in_batch = set()
     unique_raw = []
     for r in raw_list:
@@ -140,37 +143,32 @@ async def run(bot: Bot):
 
     logger.info("Собрано: %s, уникальных: %s", len(raw_list), len(unique_raw))
 
-    # ─── 2.5. Лимит на проверку за один запуск ───
-    # Приоритет: MTProto (важен для РФ), потом случайная выборка SOCKS5
-    MAX_MT_CHECK = 150         # все MTProto до этого лимита
-    MAX_SOCKS5_CHECK = 150     # случайная выборка SOCKS5
-    MAX_TOTAL_CHECK = 300      # общий лимит
-
+    # ─── 3. Лимит на проверку за один запуск ───
     mtproto_all = [r for r in unique_raw if r.get("protocol") == "MTPROTO"]
     socks5_all = [r for r in unique_raw if r.get("protocol") == "SOCKS5"]
-    other_all = [r for r in unique_raw
-                 if r.get("protocol") not in ("MTPROTO", "SOCKS5")]
+    web_all = [r for r in unique_raw if r.get("protocol") == "WEB"]
 
-    # MTProto — все (или до лимита)
+    # MTProto — все (или до лимита), это приоритет
+    random.shuffle(mtproto_all)
     mtproto_pick = mtproto_all[:MAX_MT_CHECK]
 
-    # SOCKS5 — случайная выборка
+    # SOCKS5 — минимум (случайная выборка)
     random.shuffle(socks5_all)
     socks5_pick = socks5_all[:MAX_SOCKS5_CHECK]
 
-    # Прочие (WEB и т.д.) — тоже ограничиваем
-    other_pick = other_all[:50]
+    # WEB — если есть
+    random.shuffle(web_all)
+    web_pick = web_all[:MAX_WEB_CHECK]
 
-    unique_raw = mtproto_pick + socks5_pick + other_pick
+    unique_raw = mtproto_pick + web_pick + socks5_pick
     random.shuffle(unique_raw)
 
     logger.info(
-        "Лимит на проверку: MTProto=%s SOCKS5=%s прочие=%s | всего=%s",
-        len(mtproto_pick), len(socks5_pick), len(other_pick),
-        len(unique_raw),
+        "Лимит на проверку: MTProto=%s WEB=%s SOCKS5=%s | всего=%s",
+        len(mtproto_pick), len(web_pick), len(socks5_pick), len(unique_raw),
     )
 
-    # ─── 3. Фильтрация уже просканированных ───
+    # ─── 4. Фильтрация уже просканированных ───
     fresh_raw = state.filter_unseen(unique_raw)
     logger.info(
         "Новых для сканирования: %s (пропущено: %s)",
@@ -180,41 +178,60 @@ async def run(bot: Bot):
         logger.info("Нет новых прокси для проверки")
         return
 
-    # ─── 4. Проверка (с сохранением seen) ───
-    random.shuffle(fresh_raw)
+    # ─── 5. Проверка ───
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(
         *[check_with_semaphore(sem, r) for r in fresh_raw]
     )
     working = [r for r in results if r]
 
-    logger.info("Рабочих прокси: %s", len(working))
+    # ─── Статистика ───
+    mtproto_ok = [p for p in working if p["protocol"] == "MTPROTO"]
+    web_ok = [p for p in working if p["protocol"] == "WEB"]
+    socks5_ok = [p for p in working if p["protocol"] == "SOCKS5"]
+
+    logger.info(
+        "Рабочих: MTPROTO=%s WEB=%s SOCKS5=%s | всего=%s",
+        len(mtproto_ok), len(web_ok), len(socks5_ok), len(working),
+    )
+
     if not working:
         logger.info("Ни один прокси не прошёл проверку")
         return
 
-    # ─── 5. Фильтрация уже опубликованных ───
+    # ─── 6. Фильтрация уже опубликованных ───
     working = state.filter_unpublished(working)
     logger.info("Неопубликованных: %s", len(working))
     if not working:
         logger.info("Все рабочие прокси уже публиковались")
         return
 
-    # ─── 6. Разделение по типам ───
-    mtproto = [p for p in working if p["protocol"] == "MTPROTO"]
-    socks5 = [p for p in working if p["protocol"] == "SOCKS5"]
+    mtproto_ok = [p for p in working if p["protocol"] == "MTPROTO"]
+    web_ok = [p for p in working if p["protocol"] == "WEB"]
+    socks5_ok = [p for p in working if p["protocol"] == "SOCKS5"]
 
-    max_socks5 = max(1, int(PUBLISH_COUNT * MAX_SOCKS5_RATIO))
-    socks5 = socks5[:max_socks5]
-
-    # ─── 7. Формирование выборки с приоритетом MTProto ───
+    # ─── 7. Формирование выборки ───
+    # Приоритет: MTProto → WEB → SOCKS5 (с жёстким лимитом)
     selected = []
-    selected.extend(mtproto[:PUBLISH_COUNT])
+
+    # MTProto первыми
+    random.shuffle(mtproto_ok)
+    selected.extend(mtproto_ok[:PUBLISH_COUNT])
+
     remaining = PUBLISH_COUNT - len(selected)
-    if remaining > 0:
-        pool = socks5[:]
-        random.shuffle(pool)
-        selected.extend(pool[:remaining])
+
+    # WEB — если ещё есть места
+    if remaining > 0 and web_ok:
+        random.shuffle(web_ok)
+        web_take = min(remaining, MAX_WEB_PUBLISH)
+        selected.extend(web_ok[:web_take])
+        remaining = PUBLISH_COUNT - len(selected)
+
+    # SOCKS5 — только если совсем мало MTProto
+    if remaining > 0 and socks5_ok:
+        random.shuffle(socks5_ok)
+        socks5_take = min(remaining, MAX_SOCKS5_PUBLISH)
+        selected.extend(socks5_ok[:socks5_take])
 
     if not selected:
         logger.info("Нет прокси для публикации")
