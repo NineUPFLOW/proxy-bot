@@ -1,7 +1,6 @@
 """
-Проверка прокси с учётом РУ-сегмента.
+Проверка прокси. Приоритет — MTProto для РФ.
 Увеличенные таймауты для медленных GitHub-раннеров.
-Кэш геолокации, retry при 429, корректный резолв доменов.
 """
 
 import asyncio
@@ -18,7 +17,6 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
-# ─── Глушим логи Telethon и шумные asyncio-варнинги ────────────────────
 for name in (
     "telethon", "telethon.network", "telethon.client",
     "telethon.network.mtprotosender", "telethon.network.connection",
@@ -28,22 +26,23 @@ for name in (
 
 logger = logging.getLogger(__name__)
 
-# ─── Лимиты (увеличены для GitHub runner) ──────────────────────────────
-MAX_PING_MS = 8000
-MAX_PING_WEB_MS = 4000
-CHECK_TIMEOUT = 8
-WEB_CHECK_TIMEOUT = 10
+# ─── Лимиты (увеличены для медленных раннеров) ─────────────────────────
+MAX_PING_MS = 12000
+MAX_PING_WEB_MS = 6000
+CHECK_TIMEOUT = 10
+WEB_CHECK_TIMEOUT = 12
+
+# ─── Параметры MTProto-проверки ────────────────────────────────────────
+MT_ATTEMPTS = 5          # 5 попыток
+MT_REQUIRED = 2          # нужно 2 успешных
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-# ─── URL для проверок ──────────────────────────────────────────────────
 TEST_URL_TG = "https://api.telegram.org"
 TEST_URL_RU = "https://ya.ru"
-TEST_URL_RU_ALT = "https://vk.com"
 
-# ─── Общая HTTP-сессия + кэш геолокации ────────────────────────────────
 _http_session: aiohttp.ClientSession | None = None
 _geo_cache: dict[str, dict] = {}
 _geo_semaphore = asyncio.Semaphore(5)
@@ -65,7 +64,6 @@ async def close_http_session():
     _http_session = None
 
 
-# ─── Утилиты ───────────────────────────────────────────────────────────
 def _is_ip(s: str) -> bool:
     try:
         ipaddress.ip_address(s)
@@ -75,7 +73,6 @@ def _is_ip(s: str) -> bool:
 
 
 async def _resolve(host: str) -> str | None:
-    """Резолвит домен в IP (IPv4)."""
     if _is_ip(host):
         return host
     try:
@@ -179,7 +176,7 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
-    """3 попытки, нужно 2 успешных."""
+    """5 попыток, нужно 2 успешных. Медленные прокси больше не отсеиваются."""
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
@@ -189,16 +186,16 @@ async def check_mtproto(proxy: dict) -> dict | None:
         return None
 
     pings: list[int] = []
-    for attempt in range(3):
+    for attempt in range(MT_ATTEMPTS):
         ping = await _one_mtproto_attempt(ip, port, secret)
         if ping is not None:
             pings.append(ping)
-            if len(pings) >= 2:
+            if len(pings) >= MT_REQUIRED:
                 break
-        if attempt < 2:
-            await asyncio.sleep(0.3)
+        if attempt < MT_ATTEMPTS - 1:
+            await asyncio.sleep(0.2)
 
-    if len(pings) < 2:
+    if len(pings) < MT_REQUIRED:
         return None
 
     avg_ping = sum(pings) // len(pings)
@@ -211,7 +208,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
 
 # ─── SOCKS5 ────────────────────────────────────────────────────────────
 async def check_socks5(proxy: dict) -> dict | None:
-    """Строгая проверка: Telegram + ya.ru (+ vk.com)."""
     host = proxy["ip"]
     port = int(proxy["port"])
 
@@ -230,7 +226,6 @@ async def check_socks5(proxy: dict) -> dict | None:
         async with aiohttp.ClientSession(
             connector=connector, connector_owner=False
         ) as session:
-            # Telegram — обязательный
             try:
                 async with session.get(
                     TEST_URL_TG,
@@ -242,7 +237,6 @@ async def check_socks5(proxy: dict) -> dict | None:
             except Exception:
                 return None
 
-            # ya.ru — обязательный
             try:
                 async with session.get(
                     TEST_URL_RU,
@@ -253,17 +247,6 @@ async def check_socks5(proxy: dict) -> dict | None:
                         return None
             except Exception:
                 return None
-
-            # vk.com — необязательный
-            try:
-                async with session.get(
-                    TEST_URL_RU_ALT,
-                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
-                    allow_redirects=False,
-                ):
-                    pass
-            except Exception:
-                pass
 
         ping = int((asyncio.get_running_loop().time() - t0) * 1000)
         if ping > MAX_PING_MS:
@@ -281,7 +264,6 @@ async def check_socks5(proxy: dict) -> dict | None:
             pass
 
 
-# ─── Главная функция ───────────────────────────────────────────────────
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
 
