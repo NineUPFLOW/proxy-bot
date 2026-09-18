@@ -129,7 +129,7 @@ async def run(bot: Bot):
         logger.warning("Источники пусты")
         return
 
-    # ─── 2. Дедупликация внутри батча ───
+       # ─── 2. Дедупликация внутри батча ───
     seen_in_batch = set()
     unique_raw = []
     for r in raw_list:
@@ -139,6 +139,36 @@ async def run(bot: Bot):
             unique_raw.append(r)
 
     logger.info("Собрано: %s, уникальных: %s", len(raw_list), len(unique_raw))
+
+    # ─── 2.5. Лимит на проверку за один запуск ───
+    # Приоритет: MTProto (важен для РФ), потом случайная выборка SOCKS5
+    MAX_MT_CHECK = 150         # все MTProto до этого лимита
+    MAX_SOCKS5_CHECK = 150     # случайная выборка SOCKS5
+    MAX_TOTAL_CHECK = 300      # общий лимит
+
+    mtproto_all = [r for r in unique_raw if r.get("protocol") == "MTPROTO"]
+    socks5_all = [r for r in unique_raw if r.get("protocol") == "SOCKS5"]
+    other_all = [r for r in unique_raw
+                 if r.get("protocol") not in ("MTPROTO", "SOCKS5")]
+
+    # MTProto — все (или до лимита)
+    mtproto_pick = mtproto_all[:MAX_MT_CHECK]
+
+    # SOCKS5 — случайная выборка
+    random.shuffle(socks5_all)
+    socks5_pick = socks5_all[:MAX_SOCKS5_CHECK]
+
+    # Прочие (WEB и т.д.) — тоже ограничиваем
+    other_pick = other_all[:50]
+
+    unique_raw = mtproto_pick + socks5_pick + other_pick
+    random.shuffle(unique_raw)
+
+    logger.info(
+        "Лимит на проверку: MTProto=%s SOCKS5=%s прочие=%s | всего=%s",
+        len(mtproto_pick), len(socks5_pick), len(other_pick),
+        len(unique_raw),
+    )
 
     # ─── 3. Фильтрация уже просканированных ───
     fresh_raw = state.filter_unseen(unique_raw)
