@@ -1,62 +1,59 @@
 """
-Сбор прокси из источников с учётом статистики.
-Автоматически отключает источники с низким success rate.
-
-WEB-прокси временно отключены: публичный API mtpro.xyz приостановлен,
-а других стабильных источников для TgWebProxy сейчас нет.
+Сбор прокси из открытых источников.
+Все ссылки проверены на 2026-09-18.
 """
-import aiohttp
+
 import logging
+from collections import Counter
 from urllib.parse import urlparse, parse_qs
-import state
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Источники
-# ═══════════════════════════════════════════════════════════════════════
-
-# MTProto (глобальные)
+# ─── MTProto из tg:// ссылок ───────────────────────────────────────────
 MTPROTO_URLS = [
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
     "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
     "https://raw.githubusercontent.com/ALIILAPRO/MTProtoProxy/main/mtproto.txt",
 ]
 
-# MTProto (РУ-сегмент — приоритетные)
-RU_MTPROTO_URLS = [
-    "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/proxy_ru.txt",
-]
+# RU-сегмент (маскировка под российские сервисы)
+# Правильный URL: https://github.com/kort0881/telegram-proxy-collector
+RU_MTPROTO_URL = (
+    "https://raw.githubusercontent.com/kort0881/"
+    "telegram-proxy-collector/main/proxy_ru.txt"
+)
 
-# MTProto (EU)
-EU_MTPROTO_URLS = [
-    "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/proxy_eu.txt",
-]
-
-# SOCKS5 — единственный актуальный источник (kort0881)
+# ─── SOCKS5 ────────────────────────────────────────────────────────────
 SOCKS5_URLS = [
-    "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/socks5.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    "https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/socks5.txt",
+    "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/socks5_proxies.txt",
 ]
 
-# WEB-прокси — ОТКЛЮЧЕНО (нет рабочих источников)
-# Ранее использовался https://mtpro.xyz/api/?type=webproxy —
-# приостановлен с 1 марта 2026 года.
-WEB_PROXY_URLS = []
+# ─── JSON-источники MTProto ───────────────────────────────────────────
+# Правильный URL: https://github.com/Yagami200/free-mtproto-proxies
+YAGAMI_JSON = (
+    "https://raw.githubusercontent.com/Yagami200/"
+    "free-mtproto-proxies/main/data/proxies.json"
+)
+
+# Правильный URL: https://github.com/Chumbayoumba/free-telegram-proxy-russia-2026
+CHUMBAYOUMBA_JSON = (
+    "https://raw.githubusercontent.com/Chumbayoumba/"
+    "free-telegram-proxy-russia-2026/main/mtproto.json"
+)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Загрузчики
-# ═══════════════════════════════════════════════════════════════════════
-
+# ─── ЗАГРУЗЧИКИ ────────────────────────────────────────────────────────
 async def _get_text(session, url):
     try:
         async with session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=20),
-            headers=HEADERS,
+            url, timeout=aiohttp.ClientTimeout(total=20), headers=HEADERS
         ) as r:
             if r.status == 200:
                 text = await r.text()
@@ -70,24 +67,19 @@ async def _get_text(session, url):
 async def _get_json(session, url):
     try:
         async with session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=20),
-            headers=HEADERS,
+            url, timeout=aiohttp.ClientTimeout(total=20), headers=HEADERS
         ) as r:
             if r.status == 200:
                 return await r.json()
             logger.warning("JSON fetch %s: HTTP %s", url, r.status)
     except Exception as e:
         logger.warning("JSON fetch failed %s: %s", url, e)
-    return []
+    return None
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Парсеры
-# ═══════════════════════════════════════════════════════════════════════
-
+# ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
 def _parse_tg_link(line: str):
-    """Парсит tg://proxy и tg://webproxy ссылки."""
+    """Парсит tg://proxy (ee) и tg://webproxy (dd) ссылки."""
     try:
         parsed = urlparse(line)
         params = parse_qs(parsed.query)
@@ -96,7 +88,6 @@ def _parse_tg_link(line: str):
         if not server or not secret:
             return None
 
-        # MTProto
         if "tg://proxy?" in line or "t.me/proxy?" in line:
             port = params.get("port", [None])[0]
             if not port:
@@ -111,7 +102,6 @@ def _parse_tg_link(line: str):
                 "raw": line,
             }
 
-        # WEB (на случай, если когда-то вернём источник)
         if "tg://webproxy?" in line or "t.me/webproxy?" in line:
             return {
                 "protocol": "WEB",
@@ -121,135 +111,134 @@ def _parse_tg_link(line: str):
                 "raw": line,
             }
     except Exception:
-        pass
+        return None
     return None
 
 
 def _parse_socks5_line(line: str):
-    """Парсит строки формата ip:port и socks5://ip:port."""
+    if ":" not in line:
+        return None
     try:
-        s = line.strip()
-
-        # Убираем возможный префикс
-        if s.startswith("socks5://"):
-            s = s[len("socks5://"):]
-
-        parts = s.split(":")
-        if len(parts) == 2:
-            ip, port = parts
-            return {
-                "protocol": "SOCKS5",
-                "ip": ip,
-                "port": int(port),
-                "secret": "",
-                "raw": line,
-            }
-    except Exception:
-        pass
-    return None
+        host_part = line.rsplit("@", 1)[-1] if "@" in line else line
+        ip, port = host_part.rsplit(":", 1)
+        return {
+            "protocol": "SOCKS5",
+            "ip": ip.strip(),
+            "port": int(port.strip()),
+            "raw": line,
+        }
+    except ValueError:
+        return None
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Основная функция
-# ═══════════════════════════════════════════════════════════════════════
+def _parse_yagami_json(items: list) -> list:
+    """Парсит ответ Yagami200/free-mtproto-proxies."""
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("host") or item.get("server")
+        port = item.get("port")
+        secret = item.get("secret")
+        if not all([host, port, secret]):
+            continue
+        if not secret.startswith("ee"):
+            continue
+        result.append({
+            "protocol": "MTPROTO",
+            "ip": host,
+            "port": int(port),
+            "secret": secret,
+            "raw": f"tg://proxy?server={host}&port={port}&secret={secret}",
+        })
+    return result
 
-async def fetch_all_proxies():
-    """Собирает прокси из всех источников с учётом статистики."""
-    working_sources = state.get_working_sources(min_success_rate=0.005)
-    if not working_sources:
-        working_sources = (
-            MTPROTO_URLS + RU_MTPROTO_URLS + EU_MTPROTO_URLS
-            + SOCKS5_URLS + WEB_PROXY_URLS
-        )
 
-    all_proxies = []
+def _parse_chumbayoumba_json(items: list) -> list:
+    """Парсит ответ Chumbayoumba/free-telegram-proxy-russia-2026."""
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        host = item.get("server") or item.get("host")
+        port = item.get("port")
+        secret = item.get("secret")
+        if not all([host, port, secret]):
+            continue
+        if not secret.startswith("ee"):
+            continue
+        result.append({
+            "protocol": "MTPROTO",
+            "ip": host,
+            "port": int(port),
+            "secret": secret,
+            "raw": f"tg://proxy?server={host}&port={port}&secret={secret}",
+        })
+    return result
 
-    async with aiohttp.ClientSession() as session:
-        # ─── MTProto (глобальные) ───
+
+# ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
+async def fetch_all_proxies() -> list:
+    result = []
+    seen = set()
+
+    def add(p):
+        key = (p["protocol"], p["ip"], p["port"])
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+
+    async with aiohttp.ClientSession(headers=HEADERS) as s:
+        # 1. MTProto из tg:// ссылок
         for url in MTPROTO_URLS:
-            if working_sources and url not in working_sources:
-                continue
-            lines = await _get_text(session, url)
-            if not lines:
-                state.record_source_failure(url)
-                continue
-            parsed = [p for p in (_parse_tg_link(l) for l in lines) if p]
-            state.update_source_stats(url, len(lines), len(parsed))
-            all_proxies.extend(parsed)
-            logger.info(
-                "MTProto %s: %s → %s",
-                url.split("/")[-1], len(lines), len(parsed),
-            )
+            lines = await _get_text(s, url)
+            added = 0
+            for line in lines:
+                p = _parse_tg_link(line)
+                if p:
+                    add(p)
+                    added += 1
+            logger.info("MTProto %s: %s → %s", url.split("/")[-2], len(lines), added)
 
-        # ─── MTProto (РУ-сегмент — приоритет) ───
-        for url in RU_MTPROTO_URLS:
-            if working_sources and url not in working_sources:
-                continue
-            lines = await _get_text(session, url)
-            if not lines:
-                state.record_source_failure(url)
-                continue
-            parsed = [p for p in (_parse_tg_link(l) for l in lines) if p]
-            state.update_source_stats(url, len(lines), len(parsed))
-            all_proxies.extend(parsed)
-            logger.info(
-                "RU-MTProto %s: %s → %s",
-                url.split("/")[-1], len(lines), len(parsed),
-            )
+        # 2. RU MTProto
+        ru_lines = await _get_text(s, RU_MTPROTO_URL)
+        added = 0
+        for line in ru_lines:
+            p = _parse_tg_link(line)
+            if p:
+                add(p)
+                added += 1
+        logger.info("RU MTProto: %s → %s", len(ru_lines), added)
 
-        # ─── MTProto (EU) ───
-        for url in EU_MTPROTO_URLS:
-            if working_sources and url not in working_sources:
-                continue
-            lines = await _get_text(session, url)
-            if not lines:
-                state.record_source_failure(url)
-                continue
-            parsed = [p for p in (_parse_tg_link(l) for l in lines) if p]
-            state.update_source_stats(url, len(lines), len(parsed))
-            all_proxies.extend(parsed)
-            logger.info(
-                "EU-MTProto %s: %s → %s",
-                url.split("/")[-1], len(lines), len(parsed),
-            )
+        # 3. Yagami200 JSON
+        yagami_data = await _get_json(s, YAGAMI_JSON)
+        if isinstance(yagami_data, list):
+            added = 0
+            for p in _parse_yagami_json(yagami_data):
+                add(p)
+                added += 1
+            logger.info("Yagami200 JSON: %s → %s", len(yagami_data), added)
 
-        # ─── SOCKS5 ───
+        # 4. Chumbayoumba JSON
+        chumb_data = await _get_json(s, CHUMBAYOUMBA_JSON)
+        if isinstance(chumb_data, list):
+            added = 0
+            for p in _parse_chumbayoumba_json(chumb_data):
+                add(p)
+                added += 1
+            logger.info("Chumbayoumba JSON: %s → %s", len(chumb_data), added)
+
+        # 5. SOCKS5
         for url in SOCKS5_URLS:
-            if working_sources and url not in working_sources:
-                continue
-            lines = await _get_text(session, url)
-            if not lines:
-                state.record_source_failure(url)
-                continue
-            parsed = [p for p in (_parse_socks5_line(l) for l in lines) if p]
-            state.update_source_stats(url, len(lines), len(parsed))
-            all_proxies.extend(parsed)
-            logger.info(
-                "SOCKS5 %s: %s → %s",
-                url.split("/")[-1], len(lines), len(parsed),
-            )
+            lines = await _get_text(s, url)
+            added = 0
+            for line in lines:
+                p = _parse_socks5_line(line)
+                if p:
+                    add(p)
+                    added += 1
+            logger.info("SOCKS5 %s: %s → %s", url.split("/")[-2], len(lines), added)
 
-        # ─── WEB — отключено ───
-        # Когда появится новый источник, раскомментировать блок ниже
-        # и заполнить WEB_PROXY_URLS.
-        #
-        # for url in WEB_PROXY_URLS:
-        #     if working_sources and url not in working_sources:
-        #         continue
-        #     data = await _get_json(session, url)
-        #     if not data:
-        #         state.record_source_failure(url)
-        #         continue
-        #     items = data if isinstance(data, list) else data.get("proxies", [])
-        #     parsed = []
-        #     for item in items:
-        #         raw = item.get("link") or item.get("url") or ""
-        #         p = _parse_tg_link(raw)
-        #         if p:
-        #             parsed.append(p)
-        #     state.update_source_stats(url, len(items), len(parsed))
-        #     all_proxies.extend(parsed)
-        #     logger.info("WEB %s: %s → %s", url, len(items), len(parsed))
-
-    logger.info("Всего собрано: %s", len(all_proxies))
-    return all_proxies
+    stats = Counter(p["protocol"] for p in result)
+    logger.info("Всего собрано: %s | %s", len(result), dict(stats))
+    return result
