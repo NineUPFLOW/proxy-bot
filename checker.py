@@ -1,7 +1,9 @@
 """
 Проверка прокси с учётом РУ-сегмента.
 Дополнительные проверки для обхода ТСПУ и глушилок.
+Кэш геолокации, retry при 429, HEADERS для HTTP-запросов.
 """
+
 import asyncio
 import hashlib
 import ipaddress
@@ -16,11 +18,8 @@ from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermedia
 
 # ─── Глушим логи Telethon ──────────────────────────────────────────────
 for name in (
-    "telethon",
-    "telethon.network",
-    "telethon.client",
-    "telethon.network.mtprotosender",
-    "telethon.network.connection",
+    "telethon", "telethon.network", "telethon.client",
+    "telethon.network.mtprotosender", "telethon.network.connection",
 ):
     logging.getLogger(name).setLevel(logging.CRITICAL)
 
@@ -39,17 +38,20 @@ TG_SESSION = os.environ.get("TG_SESSION")
 # ─── URL для проверок ──────────────────────────────────────────────────
 TEST_URL_TG = "https://api.telegram.org"
 TEST_URL_RU = "https://ya.ru"
-TEST_URL_RU_ALT = "https://vk.com"  # дополнительный тест для РУ-сегмента
+TEST_URL_RU_ALT = "https://vk.com"
 
-# ─── Общая HTTP-сессия ─────────────────────────────────────────────────
+# ─── Общая HTTP-сессия + кэш геолокации ────────────────────────────────
 _http_session: aiohttp.ClientSession | None = None
+_geo_cache: dict[str, dict] = {}
 _geo_semaphore = asyncio.Semaphore(5)
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None or _http_session.closed:
-        _http_session = aiohttp.ClientSession()
+        _http_session = aiohttp.ClientSession(headers=HEADERS)
     return _http_session
 
 
@@ -82,22 +84,31 @@ def _country_flag(code: str) -> str:
 
 
 async def geolocate(ip: str) -> dict:
+    """Геолокация с кэшем и retry при 429."""
+    if ip in _geo_cache:
+        return _geo_cache[ip]
+
     async with _geo_semaphore:
         session = _get_http_session()
-        try:
-            async with session.get(
-                f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,isp,query",
-                timeout=aiohttp.ClientTimeout(total=8),
-            ) as r:
-                if r.status == 429:
-                    logger.warning("ip-api.com: превышен лимит запросов (429)")
-                    return {}
-                if r.status == 200:
-                    data = await r.json()
-                    if data.get("status") == "success":
-                        return data
-        except Exception as e:
-            logger.debug("geolocate(%s) failed: %s", ip, e)
+        for attempt in range(3):
+            try:
+                async with session.get(
+                    f"http://ip-api.com/json/{ip}"
+                    "?fields=status,country,countryCode,city,isp,query",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status == 429:
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if r.status == 200:
+                        data = await r.json()
+                        if data.get("status") == "success":
+                            _geo_cache[ip] = data
+                            return data
+                        return {}
+            except Exception as e:
+                logger.debug("geolocate(%s) attempt %s failed: %s", ip, attempt + 1, e)
+                await asyncio.sleep(1)
     return {}
 
 
@@ -123,7 +134,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
             connection=ConnectionTcpMTProxyRandomizedIntermediate,
             proxy=(ip, port, secret),
             timeout=CHECK_TIMEOUT,
-            connection_retries=1,
+            connection_retries=0,          # ← быстрее отсеиваем мёртвые
             retry_delay=0,
             auto_reconnect=False,
         )
@@ -160,7 +171,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
             "flag": _country_flag(geo.get("countryCode", "")),
         })
         return proxy
-
     except Exception as e:
         logger.debug("MTProto check failed: %s", e)
         return None
@@ -188,13 +198,16 @@ async def check_socks5(proxy: dict) -> dict | None:
         )
 
         start = asyncio.get_event_loop().time()
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(
-                TEST_URL_TG,
-                timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
-            ) as r:
-                if r.status not in (200, 404):
-                    return None
+        async with aiohttp.ClientSession(connector=connector, connector_owner=False) as session:
+            try:
+                async with session.get(
+                    TEST_URL_TG,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                ) as r:
+                    if r.status >= 500:
+                        return None
+            except Exception:
+                return None
 
             async with session.get(
                 TEST_URL_RU,
@@ -229,84 +242,30 @@ async def check_socks5(proxy: dict) -> dict | None:
             "flag": _country_flag(geo.get("countryCode", "")),
         })
         return proxy
-
     except Exception as e:
         logger.debug("SOCKS5 check failed: %s", e)
         return None
+    finally:
+        try:
+            await connector.close()
+        except Exception:
+            pass
 
 
-# ─── Проверка WEB ──────────────────────────────────────────────────────
-async def check_web(proxy: dict) -> dict | None:
-    """Проверка WEB (TgWebProxy) — 2 handshake."""
-    try:
-        ip = proxy["ip"]
-        port = proxy.get("port", 443)
-        secret = proxy["secret"]
-
-        if not _is_ip(ip):
-            try:
-                loop = asyncio.get_event_loop()
-                ip = await loop.getaddrinfo(ip, port)[0][4][0]
-            except Exception:
-                return None
-
-        client = TelegramClient(
-            StringSession(TG_SESSION),
-            API_ID,
-            API_HASH,
-            connection=ConnectionTcpMTProxyRandomizedIntermediate,
-            proxy=(ip, port, secret),
-            timeout=WEB_CHECK_TIMEOUT,
-            connection_retries=1,
-            retry_delay=0,
-            auto_reconnect=False,
-        )
-
-        start = asyncio.get_event_loop().time()
-        await client.connect()
-
-        success = 0
-        for _ in range(2):
-            try:
-                await client(GetConfigRequest())
-                success += 1
-            except Exception:
-                pass
-
-        elapsed = (asyncio.get_event_loop().time() - start) * 1000
-        await client.disconnect()
-
-        if success < 2 or elapsed > MAX_PING_WEB_MS:
-            return None
-
-        geo = await geolocate(ip)
-        proxy.update({
-            "ip": ip,
-            "ping": int(elapsed),
-            "id": _stable_id(ip, port),
-            "country": geo.get("country", "Unknown"),
-            "countryCode": geo.get("countryCode", ""),
-            "city": geo.get("city", "Unknown"),
-            "provider": geo.get("isp", "Unknown"),
-            "flag": _country_flag(geo.get("countryCode", "")),
-        })
-        return proxy
-
-    except Exception as e:
-        logger.debug("WEB check failed: %s", e)
-        return None
-
-
-# ─── Диспетчер ─────────────────────────────────────────────────────────
-async def process_proxy(proxy: dict) -> dict | None:
-    """Маршрутизирует проверку по типу протокола."""
-    proto = proxy.get("protocol", "").upper()
+# ─── Главная функция ───────────────────────────────────────────────────
+async def process_proxy(raw: dict) -> dict | None:
+    proto = raw["protocol"].upper()
 
     if proto == "MTPROTO":
-        return await check_mtproto(proxy)
+        if not raw.get("secret", "").startswith("ee"):
+            return None
+        return await check_mtproto(raw)
+
     if proto == "SOCKS5":
-        return await check_socks5(proxy)
+        return await check_socks5(raw)
+
     if proto == "WEB":
-        return await check_web(proxy)
+        # WEB-прокси временно отключены
+        return None
 
     return None
