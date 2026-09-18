@@ -1,26 +1,31 @@
 """
-Форматирование сообщений с премиальным оформлением.
+Аккуратное оформление сообщений с прокси.
 """
 
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ─── Иконки по протоколам ──────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ПРОТОКОЛЫ
+# ═══════════════════════════════════════════════════════════════════════
+PROTO_TITLE = {
+    "MTPROTO": "MTProto · Fake TLS",
+    "SOCKS5": "SOCKS5",
+    "WEB": "WEB · TgWebProxy",
+}
+
 PROTO_ICON = {
     "MTPROTO": "🔐",
     "SOCKS5": "🧦",
     "WEB": "🌐",
 }
 
-PROTO_LABEL = {
-    "MTPROTO": "MTProto",
-    "SOCKS5": "SOCKS5",
-    "WEB": "WEB (TgWebProxy)",
-}
 
-
-# ─── Построение ссылок ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#  ССЫЛКА
+# ═══════════════════════════════════════════════════════════════════════
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
     ip, port = p["ip"], p["port"]
@@ -36,17 +41,9 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
-def _build_label(p: dict) -> str:
-    proto = p["protocol"].upper()
-    label = PROTO_LABEL.get(proto, proto)
-    if proto == "MTPROTO" and p.get("secret", "").startswith("ee"):
-        label += " · 🛡 Fake TLS"
-    if proto == "WEB":
-        label += " · ⚠️ нестабильный"
-    return label
-
-
-# ─── Форматирование сообщения ──────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#  СООБЩЕНИЕ
+# ═══════════════════════════════════════════════════════════════════════
 def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
@@ -54,51 +51,27 @@ def format_message(p: dict) -> str:
     city = escape(str(p.get("city", "Unknown")))
     provider = escape(str(p.get("provider", "Unknown")))
     ip_display = escape(str(p.get("ip", "")))
-    ping = p.get("ping", 0)
-    ping_str = escape(str(ping)) if ping else "N/A"
+    ping = int(p.get("ping", 0))
+    title = PROTO_TITLE.get(proto, proto)
 
-    icon = PROTO_ICON.get(proto, "🔗")
-    label = _build_label(p)
-    ip_label = "🌐 Домен" if proto == "WEB" else "📍 IP"
-
-    body = (
-        f"{flag} <b>{country}</b>  ·  <code>#{p['id']}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+    return (
+        f"{flag} <b>{country}</b>\n"
+        f"<blockquote>{title}\n"
         f"\n"
-        f"┌ {icon} <b>{label}</b>\n"
-        f"├ 🌐 <b>Пинг:</b> <code>{ping_str} ms</code>\n"
-        f"├ 🏳️ <b>Страна:</b> {flag} {country}\n"
-        f"├ 🏙 <b>Город:</b> {city}\n"
-        f"├ 🏢 <b>Провайдер:</b> {provider}\n"
-        f"└ {ip_label}: <code>{ip_display}</code>\n"
+        f"📍 <code>{ip_display}</code>\n"
+        f"🌐 {ping} ms · {city}\n"
+        f"🏢 {provider}</blockquote>"
     )
 
-    footer_parts = []
-    if proto == "SOCKS5":
-        footer_parts.append("✅ Строгая проверка: Telegram + ya.ru пройдены")
-    if proto == "WEB":
-        footer_parts.append("⚠️ WEB-прокси работают нестабильно")
-    if proto == "MTPROTO":
-        footer_parts.append("⚠️ MTProto могут блокироваться ТСПУ")
 
-    if footer_parts:
-        body += "\n" + "\n".join(footer_parts)
-    return body
-
-
+# ═══════════════════════════════════════════════════════════════════════
+#  КЛАВИАТУРА
+# ═══════════════════════════════════════════════════════════════════════
 def build_keyboard(p: dict):
     proto = p["protocol"].upper()
     link = build_connect_link(p)
-
-    if proto == "WEB":
-        label = "🌐 Подключить WEB-прокси"
-    elif proto == "SOCKS5":
-        label = "🧦 Подключить SOCKS5"
-    elif proto == "MTPROTO":
-        label = "🔐 Подключить MTProto"
-    else:
-        label = "🔑 Подключить прокси"
+    icon = PROTO_ICON.get(proto, "🔗")
 
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=label, url=link)
+        InlineKeyboardButton(text=f"{icon} Подключить", url=link)
     ]])
