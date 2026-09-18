@@ -1,25 +1,18 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  Telegram Proxy Bot — Workflow
-#  ───────────────────────────────────────────────────────────────────
-#  Запускает бота по расписанию, сохраняет состояние между запусками,
-#  чтобы прокси не сканировались и не публиковались повторно.
 # ═══════════════════════════════════════════════════════════════════════
 
 name: Proxy Bot
 
 on:
   schedule:
-    # Запуск в 07, 22, 37 и 52 минуты каждого часа.
-    # Смещённые минуты реже попадают в "час пик" GitHub — запуски приходят вовремя.
     - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
-# ─── Разрешения для работы с кэшем состояния ─────────────────────────
 permissions:
   contents: read
-  actions: write          # без этого шаг Save упадёт с ошибкой 403
+  actions: write
 
-# ─── Запрет параллельных запусков (консистентность БД) ──────────────
 concurrency:
   group: proxy-bot
   cancel-in-progress: false
@@ -31,9 +24,6 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # ─────────────────────────────────────────────────────────────
-      # 1. Подготовка окружения
-      # ─────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -48,30 +38,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ─────────────────────────────────────────────────────────────
-      # 2. Восстановление состояния из кэша
-      # ─────────────────────────────────────────────────────────────
-      - name: Restore proxy state
-        id: state-restore
-        uses: actions/cache/restore@v4
+      # ─── Восстановление + сохранение в одном шаге ───
+      - name: Restore / Save proxy state
+        uses: actions/cache@v4
         with:
           path: proxy_state.db
           key: proxy-state-${{ github.run_id }}
           restore-keys: |
             proxy-state-
 
-      - name: State restore summary
+      - name: State status
         run: |
           if [ -f proxy_state.db ]; then
-            SIZE=$(du -h proxy_state.db | cut -f1)
-            echo "✅ Состояние восстановлено: $SIZE"
+            echo "✅ Состояние найдено: $(du -h proxy_state.db | cut -f1)"
           else
-            echo "ℹ️ Состояние не найдено — первый запуск, БД будет создана"
+            echo "ℹ️ Первый запуск — БД будет создана"
           fi
 
-      # ─────────────────────────────────────────────────────────────
-      # 3. Запуск бота
-      # ─────────────────────────────────────────────────────────────
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -79,31 +62,8 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-        run: |
-          echo "── Python version ──"
-          python --version
-          echo "── Files in repo ──"
-          ls -la
-          echo "── Check bot.py ──"
-          test -f bot.py && echo "✅ bot.py found" || echo "❌ bot.py NOT found"
-          echo "── Run bot ──"
-          python -u bot.py
+        run: python -u bot.py
 
-      # ─────────────────────────────────────────────────────────────
-      # 4. Сохранение состояния в кэш
-      #    if: always() — сохраняем даже если бот упал,
-      #    чтобы не потерять уже просканированные прокси.
-      # ─────────────────────────────────────────────────────────────
-      - name: Save proxy state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: proxy_state.db
-          key: proxy-state-${{ github.run_id }}
-
-      # ─────────────────────────────────────────────────────────────
-      # 5. Диагностика — вывод статистики БД в лог
-      # ─────────────────────────────────────────────────────────────
       - name: Show state stats
         if: always()
         run: |
