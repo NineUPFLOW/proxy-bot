@@ -1,6 +1,6 @@
 """
-Проверка прокси. Смягчённые лимиты для GitHub runner в США.
-Фильтр по странам, подходящим для РФ.
+Проверка прокси. Принимает MTProto с любым типом secret.
+Fake-TLS (ee) — приоритет для РФ, остальные — тоже валидны.
 """
 
 import asyncio
@@ -26,48 +26,43 @@ for name in (
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ЛИМИТЫ (смягчены)
-# ═══════════════════════════════════════════════════════════════════════
-MAX_PING_MS = 10000             # максимум 10 сек
+# ─── Лимиты ────────────────────────────────────────────────────────────
+MAX_PING_MS = 10000
 MAX_PING_WEB_MS = 8000
 CHECK_TIMEOUT = 10
 WEB_CHECK_TIMEOUT = 12
 
-MT_ATTEMPTS = 2                 # 2 попытки
-MT_REQUIRED = 1                 # достаточно 1 успешного handshake
+MT_ATTEMPTS = 3
+MT_REQUIRED = 2
 
-# ─── Приоритет протоколов ───
-PROTO_BONUS = {
-    "MTPROTO": 10000,
-    "WEB": 5000,
-    "SOCKS5": 0,
-}
-
-# ─── Страны, подходящие для РФ (Европа + СНГ + Турция + Кавказ + США) ─
-ALLOWED_COUNTRIES = {
-    # СНГ
-    "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
-    # Северная Европа
-    "DE", "NL", "FI", "SE", "NO", "DK", "EE", "LV", "LT", "IS",
-    # Центральная и Западная Европа
-    "PL", "CZ", "SK", "AT", "CH", "FR", "BE", "GB", "IE", "LU",
-    # Южная и Восточная Европа
-    "IT", "ES", "PT", "RO", "BG", "RS", "HU", "HR", "SI", "GR", "CY", "MT",
-    # Турция
-    "TR",
-    # Северная Америка
-    "US", "CA",
-    # Азия
-    "JP", "KR", "SG", "HK",
-}
-
-
+# ─── Приоритет протоколов (Fake TLS получает бонус) ────────────────────
 def compute_score(proxy: dict) -> int:
     proto = proxy.get("protocol", "").upper()
+    secret = proxy.get("secret", "")
     ping = proxy.get("ping", 0)
-    base = PROTO_BONUS.get(proto, 0)
-    return base - min(ping, 5000)
+
+    base = 0
+    if proto == "MTPROTO":
+        base = 10000
+        # Бонус за Fake TLS — он маскируется под HTTPS
+        if secret.startswith("ee"):
+            base += 3000
+    elif proto == "WEB":
+        base = 5000
+
+    return base - min(ping, 8000)
+
+
+# ─── Страны, подходящие для РФ ─────────────────────────────────────────
+ALLOWED_COUNTRIES = {
+    "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
+    "DE", "NL", "FI", "SE", "NO", "DK", "EE", "LV", "LT", "IS",
+    "PL", "CZ", "SK", "AT", "CH", "FR", "BE", "GB", "IE", "LU",
+    "IT", "ES", "PT", "RO", "BG", "RS", "HU", "HR", "SI", "GR", "CY", "MT",
+    "TR",
+    "US", "CA",
+    "JP", "KR", "SG", "HK",
+}
 
 
 API_ID = int(os.environ["API_ID"])
@@ -160,7 +155,6 @@ async def geolocate(ip: str) -> dict:
 
 def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
     country_code = geo.get("countryCode", "")
-    # Пустой countryCode — тоже отсеиваем (не смогли определить)
     if country_code and country_code not in ALLOWED_COUNTRIES:
         logger.debug("Отсев по стране: %s (%s)", ip, country_code)
         return None
@@ -179,11 +173,9 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
     return proxy
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  MTProto / WEB
-# ═══════════════════════════════════════════════════════════════════════
+# ─── MTProto / WEB ─────────────────────────────────────────────────────
+
 async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
-    """Одна попытка handshake. Возвращает пинг в мс или None."""
     client = None
     try:
         client = TelegramClient(
@@ -220,7 +212,7 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
-    """MTProto/WEB: 2 попытки, достаточно 1 успешного handshake."""
+    """MTProto/WEB: 3 попытки, нужно 2. Любой secret принимается."""
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
@@ -237,7 +229,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
             if len(pings) >= MT_REQUIRED:
                 break
         if attempt < MT_ATTEMPTS - 1:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
     if len(pings) < MT_REQUIRED:
         return None
@@ -253,11 +245,9 @@ async def check_mtproto(proxy: dict) -> dict | None:
     return _enrich(proxy, ip, avg_ping, geo)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  SOCKS5
-# ═══════════════════════════════════════════════════════════════════════
+# ─── SOCKS5 ────────────────────────────────────────────────────────────
+
 async def check_socks5(proxy: dict) -> dict | None:
-    """SOCKS5: проверка через Telegram + ya.ru."""
     host = proxy["ip"]
     port = int(proxy["port"])
 
@@ -276,7 +266,6 @@ async def check_socks5(proxy: dict) -> dict | None:
         async with aiohttp.ClientSession(
             connector=connector, connector_owner=False
         ) as session:
-            # Telegram — обязательный
             try:
                 async with session.get(
                     TEST_URL_TG,
@@ -288,7 +277,6 @@ async def check_socks5(proxy: dict) -> dict | None:
             except Exception:
                 return None
 
-            # ya.ru — обязательный
             try:
                 async with session.get(
                     TEST_URL_RU,
@@ -316,14 +304,14 @@ async def check_socks5(proxy: dict) -> dict | None:
             pass
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Главная функция
-# ═══════════════════════════════════════════════════════════════════════
+# ─── Главная функция ───────────────────────────────────────────────────
+
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
 
     if proto == "MTPROTO":
-        if not raw.get("secret", "").startswith("ee"):
+        # Принимаем ЛЮБОЙ валидный secret (не только ee)
+        if not raw.get("secret"):
             return None
         return await check_mtproto(raw)
 
