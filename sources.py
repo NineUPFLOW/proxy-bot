@@ -1,6 +1,6 @@
 """
 Сбор прокси из Telegram-источников.
-Читает и текст сообщений, и inline-кнопки.
+Читает и текст сообщений, и inline-кнопки (в каналах, группах, супергруппах).
 """
 
 import asyncio
@@ -15,7 +15,21 @@ from telethon.errors import FloodWaitError, ChannelPrivateError
 
 logger = logging.getLogger(__name__)
 
+# ─── ИСТОЧНИКИ ─────────────────────────────────────────────────────────
 TELEGRAM_SOURCES = [
+    # ── Каналы с MTProto-прокси ──
+    "TProxyRU",
+    "ProxyMTProto",
+    "MProxyFree",
+    "vnespiska",
+    "Proxy_tm_unlimited",
+    "KVN_ot_RKN",
+    "telemt_free_proxy",
+    "proxy_first_ru",
+    "MTProto34",
+    "mtpro_xyz",
+    "proxy_telegramt",
+    # ── Группы и форумы ──
     "urlsources",
     "strbypass",
     "PODVAL_MIX",
@@ -24,7 +38,7 @@ TELEGRAM_SOURCES = [
     "RaViraNet",
 ]
 
-MESSAGES_LIMIT = 200
+MESSAGES_LIMIT = 500
 SOURCE_TIMEOUT = 30
 SOURCE_DELAY = 3
 
@@ -41,6 +55,8 @@ def _init_telegram_env():
         API_HASH = os.environ["API_HASH"]
         TG_SESSION = os.environ.get("TG_SESSION")
 
+
+# ─── ПАРСЕРЫ ───────────────────────────────────────────────────────────
 
 def _parse_tg_proxy(line: str):
     try:
@@ -186,6 +202,10 @@ def _extract_proxies_from_text(text: str) -> list:
 
 
 def _extract_proxies_from_markup(msg) -> list:
+    """
+    Извлекает прокси из inline-кнопок.
+    Работает и для каналов, и для групп, и для супергрупп.
+    """
     if not msg.reply_markup:
         return []
     result = []
@@ -193,16 +213,29 @@ def _extract_proxies_from_markup(msg) -> list:
         rows = getattr(msg.reply_markup, "rows", [])
         for row in rows:
             for button in row.buttons:
+                # URL-кнопки
                 url = getattr(button, "url", None)
-                if not url:
+                if url:
+                    p = _extract_from_token(url)
+                    if p:
+                        result.append(p)
                     continue
-                p = _extract_from_token(url)
-                if p:
-                    result.append(p)
+                # Кнопки с callback_data могут содержать tg-ссылки
+                data = getattr(button, "data", None)
+                if data:
+                    try:
+                        data_str = data.decode("utf-8", errors="ignore")
+                        p = _extract_from_token(data_str)
+                        if p:
+                            result.append(p)
+                    except Exception:
+                        pass
     except Exception as e:
         logger.debug("markup parse error: %s", e)
     return result
 
+
+# ─── ПАРСИНГ ИСТОЧНИКОВ ────────────────────────────────────────────────
 
 async def _fetch_from_source(client: TelegramClient, source: str) -> list:
     result = []
@@ -287,6 +320,8 @@ async def fetch_from_telegram_sources() -> list:
     logger.info("Из Telegram-источников собрано: %s", len(result))
     return result
 
+
+# ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 
 async def fetch_all_proxies() -> list:
     result = []
