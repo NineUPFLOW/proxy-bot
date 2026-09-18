@@ -8,7 +8,7 @@
 6. Дедупликация рабочих (по ip:port)
 7. Фильтрация уже опубликованных (published)
 8. Сортировка по score
-9. Публикация топ-6
+9. Публикация ВСЕХ рабочих (с лимитами по протоколам)
 """
 
 import asyncio
@@ -46,9 +46,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
 # ─── Публикация ───
-PUBLISH_COUNT = 6
-MAX_SOCKS5_PUBLISH = 1
-MAX_WEB_PUBLISH = 3
+MT_PUBLISH_MAX = 15          # максимум MTProto в одной публикации
+MAX_WEB_PUBLISH = 3          # максимум WEB
+MAX_SOCKS5_PUBLISH = 1       # максимум SOCKS5
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
@@ -160,12 +160,9 @@ async def run(bot: Bot):
         len(mtproto_pick), len(web_pick), len(socks5_pick), len(raw_list),
     )
 
-    mtproto_cnt = len(mtproto_pick)
-    web_cnt = len(web_pick)
-    socks5_cnt = len(socks5_pick)
     logger.info(
         "По протоколам: MTProto=%s WEB=%s SOCKS5=%s",
-        mtproto_cnt, web_cnt, socks5_cnt,
+        len(mtproto_pick), len(web_pick), len(socks5_pick),
     )
 
     # ─── 4. Фильтрация уже просканированных ───
@@ -232,20 +229,22 @@ async def run(bot: Bot):
         )
 
     # ─── 8. Формирование выборки ───
+    # Публикуем ВСЕ рабочие, соблюдая пропорции по протоколам:
+    #   MTProto — до MT_PUBLISH_MAX
+    #   WEB     — до MAX_WEB_PUBLISH
+    #   SOCKS5  — до MAX_SOCKS5_PUBLISH
     mtproto_sorted = [p for p in working if p["protocol"] == "MTPROTO"]
     web_sorted = [p for p in working if p["protocol"] == "WEB"]
     socks5_sorted = [p for p in working if p["protocol"] == "SOCKS5"]
 
     selected = []
-    selected.extend(mtproto_sorted[:PUBLISH_COUNT])
+    selected.extend(mtproto_sorted[:MT_PUBLISH_MAX])
 
-    remaining = PUBLISH_COUNT - len(selected)
-    if remaining > 0 and web_sorted:
-        selected.extend(web_sorted[:min(remaining, MAX_WEB_PUBLISH)])
-        remaining = PUBLISH_COUNT - len(selected)
+    if web_sorted:
+        selected.extend(web_sorted[:MAX_WEB_PUBLISH])
 
-    if remaining > 0 and socks5_sorted:
-        selected.extend(socks5_sorted[:min(remaining, MAX_SOCKS5_PUBLISH)])
+    if socks5_sorted:
+        selected.extend(socks5_sorted[:MAX_SOCKS5_PUBLISH])
 
     # Финальная дедупликация
     selected = dedup_by_ip_port(selected)
@@ -255,8 +254,8 @@ async def run(bot: Bot):
         return
 
     logger.info(
-        "Публикуем %s из %s доступных (запрошено %s)",
-        len(selected), len(working), PUBLISH_COUNT,
+        "Публикуем %s прокси (из %s доступных)",
+        len(selected), len(working),
     )
 
     # ─── 9. Публикация ───
