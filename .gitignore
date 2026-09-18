@@ -1,7 +1,5 @@
 __pycache__/
 *.pyc
 *.pyo
-.env
-session/
-*.session
-seen.json
+*.pyd
+proxy_state.db
