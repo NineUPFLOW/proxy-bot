@@ -5,6 +5,7 @@ TG_SESSION автоматически через GitHub Secrets.
 
 import asyncio
 import logging
+import os
 from collections import Counter
 from urllib.parse import urlparse, parse_qs
 
