@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "proxy_state.db"
 
-SEEN_TTL = 6 * 3600
+SEEN_TTL = 1 * 3600         # 1 час 
 PUBLISHED_TTL = 48 * 3600
 SOURCE_STATS_TTL = 7 * 24 * 3600
 
