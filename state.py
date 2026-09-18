@@ -3,6 +3,7 @@
 Отслеживает просканированные прокси, предотвращает дубликаты,
 ведёт статистику по источникам.
 """
+
 import sqlite3
 import hashlib
 import time
@@ -15,9 +16,9 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent / "proxy_state.db"
 
 # TTL для записей (в секундах)
-SEEN_TTL = 6 * 3600              # 6 часов — не сканировать повторно
-PUBLISHED_TTL = 24 * 3600        # 24 часа — не публиковать повторно
-SOURCE_STATS_TTL = 7 * 24 * 3600 # 7 дней — статистика источников
+SEEN_TTL = 6 * 3600            # 6 часов — не сканировать повторно
+PUBLISHED_TTL = 24 * 3600      # 24 часа — не публиковать повторно
+SOURCE_STATS_TTL = 7 * 24 * 3600  # 7 дней — статистика источников
 
 
 def _proxy_hash(proxy: dict) -> str:
@@ -54,7 +55,6 @@ def init_db():
                 last_seen REAL NOT NULL,
                 check_count INTEGER DEFAULT 1
             );
-
             CREATE TABLE IF NOT EXISTS published_proxies (
                 hash TEXT PRIMARY KEY,
                 ip TEXT NOT NULL,
@@ -63,7 +63,6 @@ def init_db():
                 published_at REAL NOT NULL,
                 ping_ms INTEGER
             );
-
             CREATE TABLE IF NOT EXISTS source_stats (
                 url TEXT PRIMARY KEY,
                 total_fetched INTEGER DEFAULT 0,
@@ -72,7 +71,6 @@ def init_db():
                 last_failure REAL,
                 consecutive_failures INTEGER DEFAULT 0
             );
-
             CREATE INDEX IF NOT EXISTS idx_seen_last_seen
                 ON seen_proxies(last_seen);
             CREATE INDEX IF NOT EXISTS idx_published_at
@@ -123,84 +121,38 @@ def is_published(proxy: dict) -> bool:
 def mark_published(proxy: dict):
     """Отмечает прокси как опубликованный."""
     h = _proxy_hash(proxy)
+    now = time.time()
     with _connect() as conn:
         conn.execute("""
-            INSERT OR REPLACE INTO published_proxies
+            INSERT INTO published_proxies
                 (hash, ip, port, protocol, published_at, ping_ms)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            h, proxy["ip"], proxy["port"], proxy["protocol"],
-            time.time(), proxy.get("ping", 0),
-        ))
+            ON CONFLICT(hash) DO UPDATE SET
+                published_at = excluded.published_at,
+                ping_ms = excluded.ping_ms
+        """, (h, proxy["ip"], proxy["port"], proxy["protocol"], now,
+              proxy.get("ping")))
 
 
-def filter_unseen(proxies: list[dict]) -> list[dict]:
-    """Фильтрует список прокси, оставляя только непроверенные."""
+def filter_unseen(proxies: list) -> list:
+    """Возвращает только те прокси, которые не сканировались недавно."""
     return [p for p in proxies if not is_seen(p)]
 
 
-def filter_unpublished(proxies: list[dict]) -> list[dict]:
-    """Фильтрует список прокси, оставляя только неопубликованные."""
+def filter_unpublished(proxies: list) -> list:
+    """Возвращает только те прокси, которые не публиковались недавно."""
     return [p for p in proxies if not is_published(p)]
 
 
-def update_source_stats(url: str, fetched: int, working: int):
-    """Обновляет статистику по источнику."""
-    now = time.time()
-    with _connect() as conn:
-        conn.execute("""
-            INSERT INTO source_stats
-                (url, total_fetched, total_working, last_success, consecutive_failures)
-            VALUES (?, ?, ?, ?, 0)
-            ON CONFLICT(url) DO UPDATE SET
-                total_fetched = total_fetched + excluded.total_fetched,
-                total_working = total_working + excluded.total_working,
-                last_success = excluded.last_success,
-                consecutive_failures = 0
-        """, (url, fetched, working, now))
-
-
-def record_source_failure(url: str):
-    """Фиксирует неудачу источника."""
-    with _connect() as conn:
-        conn.execute("""
-            INSERT INTO source_stats (url, consecutive_failures, last_failure)
-            VALUES (?, 1, ?)
-            ON CONFLICT(url) DO UPDATE SET
-                consecutive_failures = consecutive_failures + 1,
-                last_failure = excluded.last_failure
-        """, (url, time.time()))
-
-
-def get_working_sources(min_success_rate: float = 0.01) -> list[str]:
-    """Возвращает источники с достаточным success rate."""
-    with _connect() as conn:
-        rows = conn.execute("""
-            SELECT url, total_fetched, total_working
-            FROM source_stats
-            WHERE total_fetched >= 5
-              AND consecutive_failures < 5
-        """).fetchall()
-        return [
-            url for url, fetched, working in rows
-            if fetched > 0 and (working / fetched) >= min_success_rate
-        ]
-
-
 def cleanup():
-    """Удаляет устаревшие записи."""
+    """Удаляет устаревшие записи из БД."""
     now = time.time()
+    seen_cutoff = now - SEEN_TTL
+    published_cutoff = now - PUBLISHED_TTL
+    stats_cutoff = now - SOURCE_STATS_TTL
+
     with _connect() as conn:
-        conn.execute(
-            "DELETE FROM seen_proxies WHERE last_seen < ?",
-            (now - SEEN_TTL * 2,),
-        )
-        conn.execute(
-            "DELETE FROM published_proxies WHERE published_at < ?",
-            (now - PUBLISHED_TTL * 2,),
-        )
-        conn.execute(
-            "DELETE FROM source_stats WHERE last_success < ? AND last_failure < ?",
-            (now - SOURCE_STATS_TTL, now - SOURCE_STATS_TTL),
-        )
+        conn.execute("DELETE FROM seen_proxies WHERE last_seen < ?", (seen_cutoff,))
+        conn.execute("DELETE FROM published_proxies WHERE published_at < ?", (published_cutoff,))
+        conn.execute("DELETE FROM source_stats WHERE last_success < ?", (stats_cutoff,))
     logger.info("Очистка состояния выполнена")
