@@ -1,40 +1,69 @@
 """
 Проверка прокси. Приоритет — MTProto для РФ.
+Теперь ловит все форматы, даже текстовые прокси.
 """
 import asyncio
-import logging
-import ipaddress
-import socket
 import hashlib
-from urllib.parse import urlparse, parse_qs
+import ipaddress
+import logging
+import os
+import socket
 
 import aiohttp
-import aiohttp_socks
-from aiogram import Bot
+from aiohttp_socks import ProxyConnector, ProxyType
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.tl.functions.help import GetConfigRequest
+from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
+
+for name in (
+    "telethon", "telethon.network", "telethon.client",
+    "telethon.network.mtprotosender", "telethon.network.connection",
+    "asyncio",
+):
+    logging.getLogger(name).setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
-# ─── Глобальные ─────────────────────────────────────────────────────────
-MAX_CHECK_TIMEOUT = 10
-WEB_CHECK_TIMEOUT = 5
-SOCKS5_CHECK_TIMEOUT = 8
+# ─── Лимиты ────────────────────────────────────────────────────────────
+MAX_PING_MS = 3000
+MAX_PING_WEB_MS = 3000
+CHECK_TIMEOUT = 8
+WEB_CHECK_TIMEOUT = 10
+
+MT_ATTEMPTS = 3
+MT_REQUIRED = 2
+
+# ─── Скоринг ───────────────────────────────────────────────────────────
+def compute_score(proxy: dict) -> int:
+    proto = proxy.get("protocol", "").upper()
+    ping = proxy.get("ping", 0)
+    base = {
+        "MTPROTO": 10000,
+        "WEB": 5000,
+        "SOCKS5": 0,
+    }.get(proto, 0)
+    return base - min(ping, 5000)
+
+
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+TG_SESSION = os.environ.get("TG_SESSION")
+
+TEST_URL_TG = "https://api.telegram.org"
+TEST_URL_RU = "https://ya.ru"
 
 _http_session: aiohttp.ClientSession | None = None
 _geo_cache: dict[str, dict] = {}
 _geo_semaphore = asyncio.Semaphore(5)
 
-# ─── Логирование шумных библиотек ─────────────────────────────────────
-logging.getLogger("telethon").setLevel(logging.CRITICAL)
-logging.getLogger("telethon.network").setLevel(logging.CRITICAL)
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None or _http_session.closed:
-        _http_session = aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=aiohttp.ClientTimeout(total=5),
-        )
+        _http_session = aiohttp.ClientSession(headers=HEADERS)
     return _http_session
 
 
@@ -80,109 +109,204 @@ def _country_flag(code: str) -> str:
 async def geolocate(ip: str) -> dict:
     if ip in _geo_cache:
         return _geo_cache[ip]
+
     async with _geo_semaphore:
-        try:
-            async with _get_http_session().get(
-                f"https://ipinfo.io/{ip}/json",
-                timeout=5,
-            ) as resp:
-                if resp.status != 200:
-                    raise Exception("HTTP error")
-                data = await resp.json()
-            country = data.get("country", "Unknown")
-            city = data.get("city", "Unknown")
-            provider = data.get("org", "Unknown")
-            flag = _country_flag(country)
-            geo = {"flag": flag, "country": country, "city": city, "provider": provider}
-            _geo_cache[ip] = geo
-            return geo
-        except Exception as e:
-            logger.debug("geolocate(%s) failed: %s", ip, e)
-            return {"flag": "🏳️", "country": "Unknown", "city": "Unknown", "provider": "Unknown"}
+        session = _get_http_session()
+        for attempt in range(3):
+            try:
+                async with session.get(
+                    f"http://ip-api.com/json/{ip}"
+                    "?fields=status,country,countryCode,city,isp,query",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status == 429:
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    if r.status == 200:
+                        data = await r.json()
+                        if data.get("status") == "success":
+                            _geo_cache[ip] = data
+                            return data
+                        return {}
+            except Exception as e:
+                logger.debug("geolocate(%s) #%s: %s", ip, attempt + 1, e)
+                await asyncio.sleep(1)
+    return {}
 
 
-async def check_mtproto(raw: dict) -> dict | None:
-    ip = raw["ip"]
-    port = raw["port"]
-    secret = raw["secret"]
+def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict:
+    proxy.update({
+        "ip": ip,
+        "ping": ping,
+        "id": _stable_id(ip, proxy["port"]),
+        "country": geo.get("country", "Unknown"),
+        "countryCode": geo.get("countryCode", ""),
+        "city": geo.get("city", "Unknown"),
+        "provider": geo.get("isp", "Unknown"),
+        "flag": _country_flag(geo.get("countryCode", "")),
+    })
+    proxy["score"] = compute_score(proxy)
+    return proxy
+
+
+async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
+    client = None
     try:
         client = TelegramClient(
-            StringSession(),
-            API_ID,
-            API_HASH,
-            timeout=15,
+            StringSession(TG_SESSION),
+            API_ID, API_HASH,
+            connection=ConnectionTcpMTProxyRandomizedIntermediate,
+            proxy=(ip, port, secret),
+            timeout=CHECK_TIMEOUT,
             connection_retries=0,
+            retry_delay=0,
             auto_reconnect=False,
         )
-        await client.connect()
-        proxy = await client.get_proxy(ip, port, secret=secret, timeout=MAX_CHECK_TIMEOUT)
-        if proxy:
-            await client.disconnect()
-            return proxy
-        await client.disconnect()
+        t0 = asyncio.get_running_loop().time()
+
+        await asyncio.wait_for(client.connect(), timeout=CHECK_TIMEOUT)
+        if not client.is_connected():
+            return None
+
+        await asyncio.wait_for(
+            client(GetConfigRequest()), timeout=CHECK_TIMEOUT
+        )
+        return int((asyncio.get_running_loop().time() - t0) * 1000)
+    except (asyncio.TimeoutError, asyncio.CancelledError, ConnectionError, OSError):
+        return None
     except Exception as e:
-        logger.debug("MTProto %s:%s failed: %s", ip, port, e)
-    return None
+        logger.debug("mtproto attempt %s:%s — %s", ip, port, e)
+        return None
+    finally:
+        if client is not None:
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=2)
+            except Exception:
+                pass
 
 
-async def check_socks5(raw: dict) -> dict | None:
-    ip = raw["ip"]
-    port = raw["port"]
+async def check_mtproto(proxy: dict) -> dict | None:
+    host = proxy["ip"]
+    port = int(proxy["port"])
+    secret = proxy["secret"]
+
+    ip = await _resolve(host)
+    if not ip:
+        return None
+
+    pings: list[int] = []
+    for attempt in range(MT_ATTEMPTS):
+        ping = await _one_mtproto_attempt(ip, port, secret)
+        if ping is not None:
+            pings.append(ping)
+            if len(pings) >= MT_REQUIRED:
+                break
+        if attempt < MT_ATTEMPTS - 1:
+            await asyncio.sleep(0.3)
+
+    if len(pings) < MT_REQUIRED:
+        return None
+
+    avg_ping = sum(pings) // len(pings)
+
+    is_web = proxy["protocol"].upper() == "WEB"
+    limit = MAX_PING_WEB_MS if is_web else MAX_PING_MS
+    if avg_ping > limit:
+        return None
+
+    geo = await geolocate(ip)
+    return _enrich(proxy, ip, avg_ping, geo)
+
+
+async def check_socks5(proxy: dict) -> dict | None:
+    host = proxy["ip"]
+    port = int(proxy["port"])
+
+    ip = await _resolve(host)
+    if not ip:
+        return None
+
+    connector = ProxyConnector(
+        proxy_type=ProxyType.SOCKS5,
+        host=ip,
+        port=port,
+        rdns=True,
+    )
     try:
-        async with aiohttp_socks.ProxyConnector.from_url(
-            f"socks5://{ip}:{port}",
-            ssl=False,
-            limit=1,
-        ) as connector:
-            async with aiohttp.ClientSession(connector=connector) as session:
+        t0 = asyncio.get_running_loop().time()
+        async with aiohttp.ClientSession(
+            connector=connector, connector_owner=False
+        ) as session:
+            try:
                 async with session.get(
-                    TEST_URL_RU, timeout=SOCKS5_CHECK_TIMEOUT
-                ) as resp:
-                    if resp.status == 200:
-                        return raw
+                    TEST_URL_TG,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                    allow_redirects=False,
+                ) as r:
+                    if r.status >= 500:
+                        return None
+            except Exception:
+                return None
+
+            try:
+                async with session.get(
+                    TEST_URL_RU,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                    allow_redirects=False,
+                ) as r:
+                    if r.status >= 500:
+                        return None
+            except Exception:
+                return None
+
+        ping = int((asyncio.get_running_loop().time() - t0) * 1000)
+        if ping > MAX_PING_MS:
+            return None
+
+        geo = await geolocate(ip)
+        return _enrich(proxy, ip, ping, geo)
     except Exception as e:
-        logger.debug("SOCKS5 %s:%s failed: %s", ip, port, e)
-    return None
+        logger.debug("socks5 %s:%s — %s", ip, port, e)
+        return None
+    finally:
+        try:
+            await connector.close()
+        except Exception:
+            pass
 
 
-async def check_web(raw: dict) -> dict | None:
-    ip = raw["ip"]
-    port = raw["port"]
-    secret = raw["secret"]
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"http://{ip}:{port}"
-            if port != 443:
-                url = f"http://{ip}:{port}"
-            async with session.get(
-                url, timeout=WEB_CHECK_TIMEOUT, ssl=False
-            ) as resp:
-                if resp.status == 200:
-                    return raw
-    except Exception as e:
-        logger.debug("WEB %s:%s failed: %s", ip, port, e)
-    return None
-
-
-# ─── Скоринг ───────────────────────────────────────────────────────────
-def compute_score(proxy: dict) -> int:
-    proto = proxy.get("protocol", "").upper()
-    ping = proxy.get("ping", 0)
-    base = {"MTPROTO": 10000, "WEB": 5000, "SOCKS5": 0}.get(proto, 0)
-    return base - min(ping, 5000)
-
-
-# ─── Проверка одного прокси ────────────────────────────────────────────
+# ─── Проверка одного прокси (работает с любыми форматами) ───────────────
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
+    secret = raw.get("secret", "")
+
     if proto == "MTPROTO":
-        if not raw.get("secret", "").startswith("ee"):
+        if not secret.startswith("ee"):
             return None
         return await check_mtproto(raw)
+
     if proto == "WEB":
-        if not raw.get("secret", "").startswith("dd"):
+        if not secret.startswith("dd"):
             return None
-        return await check_web(raw)
+        return await check_mtproto(raw)
+
     if proto == "SOCKS5":
         return await check_socks5(raw)
-    return None
+
+    # ─── ФАЛЛБЕК: любой формат без tg:// или tg.me/ ─────────────────────
+    host = raw.get("ip") or raw.get("server") or raw.get("server", "")
+    port = raw.get("port") or raw.get("port", 443)
+    secret = raw.get("secret", "")
+
+    if not host or not port:
+        return None
+
+    new_raw = {
+        "protocol": "MTPROTO" if proto == "MTPROTO" else ("WEB" if proto == "WEB" else "SOCKS5"),
+        "ip": host,
+        "port": int(port),
+        "secret": secret,
+    }
+    return await process_proxy(new_raw)  # рекурсивно через правильный путь
+
+# (остальной код checker.py идентичен оригиналу до конца)
