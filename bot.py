@@ -10,7 +10,6 @@
 8. Сортировка по score
 9. Публикация ВСЕХ рабочих (с лимитами по протоколам)
 """
-
 import asyncio
 import logging
 import os
@@ -290,3 +289,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    logger.info("✅ Бот успешно завершил цикл публикации прокси!")
