@@ -1,11 +1,11 @@
 """
 Точка входа. Запускает полный цикл:
 1. Сбор прокси из источников (MTProto + SOCKS5)
-2. Фильтрация уже просканированных
-3. Проверка новых
-4. Фильтрация уже опубликованных
-5. Публикация лучших
-WEB-прокси временно отключены: нет рабочих источников.
+2. Дедупликация в батче
+3. Фильтрация уже просканированных (seen)
+4. Проверка новых
+5. Фильтрация уже опубликованных
+6. Публикация лучших
 """
 
 import asyncio
@@ -32,6 +32,15 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     force=True,
 )
+
+# Глушим шумные логгеры
+for noisy in (
+    "telethon", "telethon.network", "telethon.client",
+    "telethon.network.mtprotosender", "telethon.network.connection",
+    "asyncio", "aiogram.event",
+):
+    logging.getLogger(noisy).setLevel(logging.CRITICAL)
+
 logger = logging.getLogger("bot")
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -51,9 +60,16 @@ MAX_SEND_RETRIES = 3
 # Проверка прокси с ограничением параллелизма
 # ═══════════════════════════════════════════════════════════════════════
 async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
+    """
+    Проверяет один прокси. Успешно прошедшие проверку сразу
+    помечаются как seen, чтобы больше не сканироваться.
+    """
     async with sem:
         try:
-            return await process_proxy(raw)
+            result = await process_proxy(raw)
+            if result is not None:
+                state.mark_seen(result)
+            return result
         except Exception as e:
             logger.debug("check error: %s", e)
             return None
@@ -63,6 +79,7 @@ async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
 # Отправка с retry
 # ═══════════════════════════════════════════════════════════════════════
 async def send_with_retry(bot: Bot, p: dict) -> bool:
+    """Отправляет сообщение с прокси, учитывая flood-control Telegram."""
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
             await bot.send_message(
@@ -105,7 +122,7 @@ async def run(bot: Bot):
     state.init_db()
     state.cleanup()
 
-    # ─── 1. Сбор ───
+    # ─── 1. Сбор прокси ───
     logger.info("Сбор прокси из источников...")
     raw_list = await fetch_all_proxies()
     if not raw_list:
@@ -116,7 +133,7 @@ async def run(bot: Bot):
     seen_in_batch = set()
     unique_raw = []
     for r in raw_list:
-        key = f"{r.get('ip')}:{r.get('port')}:{r.get('protocol')}"
+        key = f"{r.get('protocol')}:{r.get('ip')}:{r.get('port')}"
         if key not in seen_in_batch:
             seen_in_batch.add(key)
             unique_raw.append(r)
@@ -133,17 +150,18 @@ async def run(bot: Bot):
         logger.info("Нет новых прокси для проверки")
         return
 
-    # ─── 4. Проверка ───
+    # ─── 4. Проверка (с сохранением seen) ───
     random.shuffle(fresh_raw)
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(
         *[check_with_semaphore(sem, r) for r in fresh_raw]
     )
     working = [r for r in results if r]
-    for p in working:
-        state.mark_seen(p)
 
     logger.info("Рабочих прокси: %s", len(working))
+    if not working:
+        logger.info("Ни один прокси не прошёл проверку")
+        return
 
     # ─── 5. Фильтрация уже опубликованных ───
     working = state.filter_unpublished(working)
@@ -179,7 +197,7 @@ async def run(bot: Bot):
         ok = await send_with_retry(bot, p)
         if ok:
             published_ok.append(p)
-            state.mark_published(p)          # ← КРИТИЧЕСКИ ВАЖНО
+            state.mark_published(p)
         await asyncio.sleep(SEND_DELAY)
 
     logger.info("Успешно опубликовано: %s", len(published_ok))
