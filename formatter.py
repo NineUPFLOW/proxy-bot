@@ -1,19 +1,13 @@
-"""
-Оформление сообщений с прокси.
-"""
+""" Оформление сообщений с прокси (HTML). """
 
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ССЫЛКА
-# ═══════════════════════════════════════════════════════════════════════
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
     ip, port = p["ip"], p["port"]
-
     if proto == "MTPROTO":
         return f"tg://proxy?server={ip}&port={port}&secret={p['secret']}"
     if proto == "SOCKS5":
@@ -25,9 +19,6 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  СООБЩЕНИЕ
-# ═══════════════════════════════════════════════════════════════════════
 def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
@@ -39,24 +30,22 @@ def format_message(p: dict) -> str:
     pid = p.get("id", 0)
 
     return (
-        f"🔗 <b>#{pid}</b>: {flag} <b>{country}</b>\n"
+        f"<b>#{pid}: {flag} {country}</b>\n"
         f"\n"
         f"┌ ✅ <b>Название:</b> {flag} {country}\n"
-        f"├ 🔗 <b>Протокол:</b> {proto}\n"
-        f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
-        f"├ 📍 <b>Страна:</b> {flag} {country}\n"
-        f"├ 📍 <b>Город:</b> {city}\n"
-        f"├ 🏠 <b>Провайдер:</b> {provider}\n"
+        f"├ <b>Протокол:</b> {proto}\n"
+        f"├ <b>Пинг:</b> {ping} ms\n"
+        f"├ <b>Страна:</b> {flag} {country}\n"
+        f"├ <b>Город:</b> {city}\n"
+        f"├ <b>Провайдер:</b> {provider}\n"
         f"└ <b>IP:</b> <code>{ip_display}</code>"
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  КЛАВИАТУРА
-# ═══════════════════════════════════════════════════════════════════════
-def build_keyboard(p: dict):
+def build_keyboard(p: dict) -> InlineKeyboardMarkup:
     link = build_connect_link(p)
-
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔑 Добавить proxy в Telegram", url=link)
-    ]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Добавить proxy в Telegram", url=link)
+        ]]
+    )
