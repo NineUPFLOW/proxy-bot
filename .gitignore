@@ -1,48 +1,9 @@
-# ─── Python ──────────────────────────────────────────────────────────
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# ─── Virtual environments ────────────────────────────────────────────
-venv/
-env/
-ENV/
-.venv/
-
-# ─── Secrets & env ───────────────────────────────────────────────────
+*.pyc
+*.pyo
 .env
-.env.local
-*.env
-secrets.json
-
-# ─── Telethon sessions ───────────────────────────────────────────────
 session/
 *.session
-*.session-journal
+seen.json
 
-# ─── Bot state (генерируется автоматически) ─────────────────────────
-proxy_state.db
-proxy_state.db-wal
-proxy_state.db-shm
-proxy_state.db-journal
-
-# ─── Logs ────────────────────────────────────────────────────────────
-*.log
-logs/
-
-# ─── IDE / OS ────────────────────────────────────────────────────────
-.idea/
-.vscode/
-.DS_Store
-Thumbs.db
-
-# ─── Temporary ───────────────────────────────────────────────────────
-*.tmp
-*.temp
-tmp/
+# proxy_state.db — НЕ игнорируем, коммитим для сохранения истории между запусками
