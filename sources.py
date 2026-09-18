@@ -2,6 +2,7 @@
 Сбор прокси из Telegram-источников.
 TG_SESSION автоматически через GitHub Secrets.
 """
+
 import asyncio
 import logging
 from collections import Counter
@@ -15,9 +16,23 @@ from telethon.errors import FloodWaitError, ChannelPrivateError
 logger = logging.getLogger(__name__)
 
 TELEGRAM_SOURCES = [
-    "TProxyRU", "ProxyMTProto", "MProxyFree", "vnespiska", "Proxy_tm_unlimited",
-    "KVN_ot_RKN", "telemt_free_proxy", "proxy_first_ru", "MTProto34", "mtpro_xyz",
-    "proxy_telegramt", "urlsources", "strbypass", "PODVAL_MIX", "razlo4ka7", "FreeLifeForum", "RaViraNet",
+    "TProxyRU",
+    "ProxyMTProto",
+    "MProxyFree",
+    "vnespiska",
+    "Proxy_tm_unlimited",
+    "KVN_ot_RKN",
+    "telemt_free_proxy",
+    "proxy_first_ru",
+    "MTProto34",
+    "mtpro_xyz",
+    "proxy_telegramt",
+    "urlsources",
+    "strbypass",
+    "PODVAL_MIX",
+    "razlo4ka7",
+    "FreeLifeForum",
+    "RaViraNet",
 ]
 
 MESSAGES_LIMIT = 100
@@ -148,19 +163,23 @@ def _extract_proxies_from_text(text: str) -> list:
         return []
     result = []
     text = text.replace("`", "").replace("</a>", "")
+
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
+
         for token in line.split():
             p = _extract_from_token(token)
             if p:
                 result.append(p)
+
         if not any(s in line for s in ("tg://", "t.me/", "socks5://", "socks://")):
             for word in line.split():
                 p = _parse_bare_socks5(word)
                 if p:
                     result.append(p)
+
     return result
 
 
@@ -173,20 +192,11 @@ def _extract_proxies_from_markup(msg) -> list:
         for row in rows:
             for button in row.buttons:
                 url = getattr(button, "url", None)
-                if url:
-                    p = _extract_from_token(url)
-                    if p:
-                        result.append(p)
+                if not url:
                     continue
-                data = getattr(button, "data", None)
-                if data:
-                    try:
-                        data_str = data.decode("utf-8", errors="ignore")
-                        p = _extract_from_token(data_str)
-                        if p:
-                            result.append(p)
-                    except Exception:
-                        pass
+                p = _extract_from_token(url)
+                if p:
+                    result.append(p)
     except Exception as e:
         logger.debug("markup parse error: %s", e)
     return result
@@ -195,31 +205,51 @@ def _extract_proxies_from_markup(msg) -> list:
 async def _fetch_from_source(client: TelegramClient, source: str) -> list:
     result = []
     try:
-        await client(JoinChannelRequest(source))
-    except ChannelPrivateError:
-        return result
-    except Exception:
-        pass
+        try:
+            await client(JoinChannelRequest(source))
+        except ChannelPrivateError:
+            logger.debug("Источник @%s приватный, пропускаем", source)
+            return result
+        except Exception:
+            pass
 
-    messages = await asyncio.wait_for(
-        client.get_messages(source, limit=MESSAGES_LIMIT),
-        timeout=SOURCE_TIMEOUT,
-    )
+        messages = await asyncio.wait_for(
+            client.get_messages(source, limit=MESSAGES_LIMIT),
+            timeout=SOURCE_TIMEOUT,
+        )
 
-    for msg in messages:
-        text_proxies = _extract_proxies_from_text(msg.message or "")
-        result.extend(text_proxies)
-        markup_proxies = _extract_proxies_from_markup(msg)
-        result.extend(markup_proxies)
+        from_text = 0
+        from_markup = 0
 
+        for msg in messages:
+            text_proxies = _extract_proxies_from_text(msg.message or "")
+            result.extend(text_proxies)
+            from_text += len(text_proxies)
+
+            markup_proxies = _extract_proxies_from_markup(msg)
+            result.extend(markup_proxies)
+            from_markup += len(markup_proxies)
+
+        logger.info(
+            "Telegram @%s: %s сообщений → текст %s, кнопки %s",
+            source, len(messages), from_text, from_markup,
+        )
+    except FloodWaitError as e:
+        logger.warning("FloodWait для @%s: %ss", source, e.seconds)
+        await asyncio.sleep(min(e.seconds, 60))
+    except asyncio.TimeoutError:
+        logger.warning("Таймаут при чтении @%s", source)
+    except Exception as e:
+        logger.warning("Ошибка чтения @%s: %s", source, e)
     return result
 
 
 async def fetch_from_telegram_sources() -> list:
     if not TG_SESSION:
-        logger.warning("TG_SESSION не найден в secrets, парсинг пропущен")
+        logger.warning("TG_SESSION не задан, парсинг пропущен")
         return []
 
+    result = []
     client = None
     try:
         client = TelegramClient(
@@ -232,17 +262,17 @@ async def fetch_from_telegram_sources() -> list:
         )
         await client.connect()
 
-        result = []
+        if not await client.is_user_authorized():
+            logger.warning("TG_SESSION не авторизована")
+            return []
+
         for source in TELEGRAM_SOURCES:
             proxies = await _fetch_from_source(client, source)
             result.extend(proxies)
             await asyncio.sleep(SOURCE_DELAY)
 
-        logger.info("Из Telegram-источников собрано: %s", len(result))
-        return result
     except Exception as e:
         logger.warning("Ошибка userbot-парсера: %s", e)
-        return []
     finally:
         if client is not None:
             try:
@@ -250,7 +280,24 @@ async def fetch_from_telegram_sources() -> list:
             except Exception:
                 pass
 
+    logger.info("Из Telegram-источников собрано: %s", len(result))
+    return result
+
 
 async def fetch_all_proxies() -> list:
     result = []
     seen = set()
+
+    def add(p):
+        key = (p["protocol"], p["ip"], p["port"])
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+
+    tg_proxies = await fetch_from_telegram_sources()
+    for p in tg_proxies:
+        add(p)
+
+    stats = Counter(p["protocol"] for p in result)
+    logger.info("Всего собрано: %s | %s", len(result), dict(stats))
+    return result
