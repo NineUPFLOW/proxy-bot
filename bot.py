@@ -44,7 +44,7 @@ logger = logging.getLogger("bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-PUBLISH_COUNT = 6
+PUBLISH_COUNT = 10
 MAX_SOCKS5_PUBLISH = 1
 MAX_WEB_PUBLISH = 3
 SEND_DELAY = 3
