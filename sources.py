@@ -2,7 +2,6 @@
 Сбор прокси из Telegram-источников.
 TG_SESSION автоматически через GitHub Secrets.
 """
-import os
 import asyncio
 import logging
 from collections import Counter
@@ -255,14 +254,3 @@ async def fetch_from_telegram_sources() -> list:
 async def fetch_all_proxies() -> list:
     result = []
     seen = set()
-    def add(p):
-        key = (p["protocol"], p["ip"], p["port"])
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
-    tg_proxies = await fetch_from_telegram_sources()
-    for p in tg_proxies:
-        add(p)
-    stats = Counter(p["protocol"] for p in result)
-    logger.info("Всего собрано: %s | %s", len(result), dict(stats))
-    return result
