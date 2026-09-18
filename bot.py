@@ -25,7 +25,7 @@ import state
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    force=True,   # перезаписать любые ранее установленные хендлеры
+    force=True,
 )
 logger = logging.getLogger("bot")
 
