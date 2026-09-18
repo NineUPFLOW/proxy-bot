@@ -1,6 +1,9 @@
 """
 Оформление сообщений с прокси.
 """
+
+from html import escape
+
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
@@ -22,17 +25,17 @@ def build_connect_link(p: dict) -> str:
 def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
-    country = str(p.get("country", "Unknown"))
-    city = str(p.get("city", "Unknown"))
-    provider = str(p.get("provider", "Unknown"))
-    ip_display = str(p.get("ip", ""))
+    country = escape(str(p.get("country", "Unknown")))
+    city = escape(str(p.get("city", "Unknown")))
+    provider = escape(str(p.get("provider", "Unknown")))
+    ip_display = escape(str(p.get("ip", "")))
     ping = int(p.get("ping", 0))
     pid = p.get("id", 0)
 
     return (
         f"🔗 <b>#{pid}</b>: {flag} <b>{country}</b>\n"
         f"\n"
-        f"┌ ✅ <b>Название:</b> {flag} <b>{country}</b>\n"
+        f"┌ ✅ <b>Название:</b> {flag} {country}\n"
         f"├ 🔗 <b>Протокол:</b> {proto}\n"
         f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
         f"├ 📍 <b>Страна:</b> {flag} {country}\n"
