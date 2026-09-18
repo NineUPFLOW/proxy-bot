@@ -1,10 +1,12 @@
 """
 Точка входа. Запускает полный цикл:
-1. Сбор прокси из источников
+1. Сбор прокси из источников (MTProto + SOCKS5)
 2. Фильтрация уже просканированных
 3. Проверка новых
 4. Фильтрация уже опубликованных
 5. Публикация лучших
+
+WEB-прокси временно отключены: нет рабочих источников.
 """
 import asyncio
 import logging
@@ -21,7 +23,9 @@ from checker import process_proxy, close_http_session
 from formatter import format_message, build_keyboard
 import state
 
-# ─── Логирование ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+#  Логирование
+# ═══════════════════════════════════════════════════════════════════════
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -29,16 +33,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
-# ─── Конфигурация ───────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Конфигурация
+# ═══════════════════════════════════════════════════════════════════════
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-PUBLISH_COUNT = 5
-CONCURRENCY = 10
-MAX_SOCKS5_RATIO = 0.4
-MAX_WEB_COUNT = 2
-SEND_DELAY = 3
-MAX_SEND_RETRIES = 3
+# Публикация
+PUBLISH_COUNT = 5               # сколько прокси публиковать за цикл
+CONCURRENCY = 10                # параллельных проверок
+MAX_SOCKS5_RATIO = 0.4          # максимум SOCKS5 в публикации (40%)
+SEND_DELAY = 3                  # пауза между сообщениями (сек)
+MAX_SEND_RETRIES = 3            # попыток отправки при ошибке
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -74,8 +81,10 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
             )
             await asyncio.sleep(e.retry_after + 1)
         except TelegramAPIError as e:
-            logger.error("Ошибка публикации %s #%s: %s",
-                         p["protocol"], p.get("id"), e)
+            logger.error(
+                "Ошибка публикации %s #%s: %s",
+                p["protocol"], p.get("id"), e,
+            )
             return False
         except Exception as e:
             logger.error("Неожиданная ошибка публикации: %s", e)
@@ -91,19 +100,19 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
 #  Основной цикл
 # ═══════════════════════════════════════════════════════════════════════
 async def run(bot: Bot):
-    # 0. Инициализация состояния
+    # ─── 0. Инициализация состояния ───
     logger.info("Инициализация состояния...")
     state.init_db()
     state.cleanup()
 
-    # 1. Сбор
+    # ─── 1. Сбор ───
     logger.info("Сбор прокси из источников...")
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
         return
 
-    # 2. Дедупликация внутри батча
+    # ─── 2. Дедупликация внутри батча ───
     seen_in_batch = set()
     unique_raw = []
     for r in raw_list:
@@ -113,7 +122,7 @@ async def run(bot: Bot):
             unique_raw.append(r)
     logger.info("Собрано: %s, уникальных: %s", len(raw_list), len(unique_raw))
 
-    # 3. Фильтрация уже просканированных
+    # ─── 3. Фильтрация уже просканированных ───
     fresh_raw = state.filter_unseen(unique_raw)
     logger.info(
         "Новых для сканирования: %s (пропущено: %s)",
@@ -124,7 +133,7 @@ async def run(bot: Bot):
         logger.info("Нет новых прокси для проверки")
         return
 
-    # 4. Проверка
+    # ─── 4. Проверка ───
     random.shuffle(fresh_raw)
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(
@@ -136,7 +145,7 @@ async def run(bot: Bot):
         state.mark_seen(p)
     logger.info("Рабочих прокси: %s", len(working))
 
-    # 5. Фильтрация уже опубликованных
+    # ─── 5. Фильтрация уже опубликованных ───
     working = state.filter_unpublished(working)
     logger.info("Неопубликованных: %s", len(working))
 
@@ -144,22 +153,20 @@ async def run(bot: Bot):
         logger.info("Все рабочие прокси уже публиковались")
         return
 
-    # 6. Разделение по типам
+    # ─── 6. Разделение по типам ───
     mtproto = [p for p in working if p["protocol"] == "MTPROTO"]
-    web = [p for p in working if p["protocol"] == "WEB"]
     socks5 = [p for p in working if p["protocol"] == "SOCKS5"]
 
-    web = web[:MAX_WEB_COUNT]
     max_socks5 = max(1, int(PUBLISH_COUNT * MAX_SOCKS5_RATIO))
     socks5 = socks5[:max_socks5]
 
-    # 7. Формирование выборки с приоритетом MTProto
+    # ─── 7. Формирование выборки с приоритетом MTProto ───
     selected = []
     selected.extend(mtproto[:PUBLISH_COUNT])
     remaining = PUBLISH_COUNT - len(selected)
 
     if remaining > 0:
-        pool = socks5 + web
+        pool = socks5[:]
         random.shuffle(pool)
         selected.extend(pool[:remaining])
 
@@ -167,7 +174,7 @@ async def run(bot: Bot):
         logger.info("Нет прокси для публикации")
         return
 
-    # 8. Публикация
+    # ─── 8. Публикация ───
     logger.info("Публикуем %s прокси", len(selected))
     for p in selected:
         ok = await send_with_retry(bot, p)
@@ -175,7 +182,7 @@ async def run(bot: Bot):
             state.mark_published(p)
         await asyncio.sleep(SEND_DELAY)
 
-    # 9. Закрытие ресурсов
+    # ─── 9. Закрытие ресурсов ───
     await close_http_session()
     logger.info("Цикл завершён")
 
