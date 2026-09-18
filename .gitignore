@@ -1,9 +1,31 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Env
 .env
-session/
+.env.*
+
+# Telethon
 *.session
+*.session-journal
+session/
+
+# State
 seen.json
 
-# proxy_state.db — НЕ игнорируем, коммитим для сохранения истории между запусками
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
