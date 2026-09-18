@@ -2,6 +2,7 @@
 Сбор прокси из Telegram-источников.
 TG_SESSION автоматически через GitHub Secrets.
 """
+import os
 import asyncio
 import logging
 from collections import Counter
