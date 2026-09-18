@@ -1,9 +1,5 @@
 """
-Сбор всех видов прокси Telegram из указанных источников:
-- MTProto (tg://proxy?...ee...)
-- SOCKS5 (tg://socks?..., socks5://)
-- WEB (tg://webproxy?...dd...)
-
+Сбор прокси из указанных Telegram-источников.
 Парсер читает и текст сообщений, и inline-кнопки.
 """
 
@@ -141,7 +137,6 @@ def _parse_bare_socks5(line: str):
         port = int(port)
         if not (1 <= port <= 65535):
             return None
-        # Проверяем, что ip похож на IP-адрес
         parts = ip.split(".")
         if len(parts) != 4:
             return None
@@ -181,32 +176,16 @@ def _extract_proxies_from_text(text: str) -> list:
     result = []
     text = text.replace("`", "").replace("</a>", "")
 
-    # Убираем markdown-разметку [text](url) → url
-    cleaned = text
-    for prefix in ("](tg://", "](https://t.me/", "](http://t.me/"):
-        while prefix in cleaned:
-            idx = cleaned.find(prefix)
-            if idx < 0:
-                break
-            start = cleaned.rfind("[", 0, idx)
-            end = cleaned.find(")", idx)
-            if start < 0 or end < 0:
-                break
-            url = cleaned[idx + 2:end]
-            cleaned = cleaned[:start] + " " + url + " " + cleaned[end + 1:]
-
-    for line in cleaned.splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
 
-        # Ищем все поддерживаемые схемы
         for token in line.split():
             p = _extract_from_token(token)
             if p:
                 result.append(p)
 
-        # Fallback: bare ip:port в конце строки
         if not any(s in line for s in ("tg://", "t.me/", "socks5://", "socks://")):
             for word in line.split():
                 p = _parse_bare_socks5(word)
