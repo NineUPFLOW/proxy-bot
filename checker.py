@@ -1,7 +1,7 @@
 """
 Проверка прокси с учётом РУ-сегмента.
-Кэш геолокации, retry при 429, корректный резолв доменов,
-изоляция попыток handshake для MTProto.
+Увеличенные таймауты для медленных GitHub-раннеров.
+Кэш геолокации, retry при 429, корректный резолв доменов.
 """
 
 import asyncio
@@ -28,11 +28,11 @@ for name in (
 
 logger = logging.getLogger(__name__)
 
-# ─── Лимиты ────────────────────────────────────────────────────────────
-MAX_PING_MS = 5000
-MAX_PING_WEB_MS = 3000
-CHECK_TIMEOUT = 6
-WEB_CHECK_TIMEOUT = 8
+# ─── Лимиты (увеличены для GitHub runner) ──────────────────────────────
+MAX_PING_MS = 8000
+MAX_PING_WEB_MS = 4000
+CHECK_TIMEOUT = 8
+WEB_CHECK_TIMEOUT = 10
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -75,7 +75,7 @@ def _is_ip(s: str) -> bool:
 
 
 async def _resolve(host: str) -> str | None:
-    """Резолвит домен в IP (IPv4). Возвращает None при ошибке."""
+    """Резолвит домен в IP (IPv4)."""
     if _is_ip(host):
         return host
     try:
@@ -143,7 +143,6 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict:
 
 # ─── MTProto ───────────────────────────────────────────────────────────
 async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
-    """Одна попытка handshake. Возвращает пинг (мс) или None."""
     client = None
     try:
         client = TelegramClient(
@@ -180,7 +179,7 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
-    """3 попытки handshake (нужно 2 успешных)."""
+    """3 попытки, нужно 2 успешных."""
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
@@ -212,7 +211,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
 
 # ─── SOCKS5 ────────────────────────────────────────────────────────────
 async def check_socks5(proxy: dict) -> dict | None:
-    """Строгая проверка: Telegram + ya.ru (+ vk.com, необязательно)."""
+    """Строгая проверка: Telegram + ya.ru (+ vk.com)."""
     host = proxy["ip"]
     port = int(proxy["port"])
 
@@ -231,7 +230,7 @@ async def check_socks5(proxy: dict) -> dict | None:
         async with aiohttp.ClientSession(
             connector=connector, connector_owner=False
         ) as session:
-            # 1. Telegram — обязательный
+            # Telegram — обязательный
             try:
                 async with session.get(
                     TEST_URL_TG,
@@ -243,7 +242,7 @@ async def check_socks5(proxy: dict) -> dict | None:
             except Exception:
                 return None
 
-            # 2. ya.ru — обязательный
+            # ya.ru — обязательный
             try:
                 async with session.get(
                     TEST_URL_RU,
@@ -255,7 +254,7 @@ async def check_socks5(proxy: dict) -> dict | None:
             except Exception:
                 return None
 
-            # 3. vk.com — необязательный (для лучшего качества)
+            # vk.com — необязательный
             try:
                 async with session.get(
                     TEST_URL_RU_ALT,
