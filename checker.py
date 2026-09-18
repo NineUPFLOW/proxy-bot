@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import ipaddress
 import logging
-import socket
 import os
 import aiohttp
 from aiohttp_socks import ProxyConnector, ProxyType
@@ -75,6 +74,13 @@ def _stable_id(ip: str, port: int) -> int:
     return int(digest, 16) % 10_000_000
 
 
+def _country_flag(code: str) -> str:
+    """Преобразует код страны в emoji-флаг."""
+    if not code or len(code) != 2:
+        return "🏳️"
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code.upper())
+
+
 async def geolocate(ip: str) -> dict:
     async with _geo_semaphore:
         session = _get_http_session()
@@ -103,7 +109,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
         port = proxy["port"]
         secret = proxy["secret"]
 
-        # Если IP — домен, резолвим
         if not _is_ip(ip):
             try:
                 loop = asyncio.get_event_loop()
@@ -129,7 +134,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
             await client.disconnect()
             return None
 
-        # 3 handshake
         success = 0
         for _ in range(3):
             try:
@@ -185,15 +189,13 @@ async def check_socks5(proxy: dict) -> dict | None:
 
         start = asyncio.get_event_loop().time()
         async with aiohttp.ClientSession(connector=connector) as session:
-            # Проверка Telegram
             async with session.get(
                 TEST_URL_TG,
                 timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
             ) as r:
-                if r.status != 200 and r.status != 404:
+                if r.status not in (200, 404):
                     return None
 
-            # Проверка ya.ru
             async with session.get(
                 TEST_URL_RU,
                 timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
@@ -201,7 +203,6 @@ async def check_socks5(proxy: dict) -> dict | None:
                 if r.status != 200:
                     return None
 
-            # Дополнительная проверка для РУ-сегмента
             try:
                 async with session.get(
                     TEST_URL_RU_ALT,
@@ -213,7 +214,6 @@ async def check_socks5(proxy: dict) -> dict | None:
                 pass
 
         elapsed = (asyncio.get_event_loop().time() - start) * 1000
-
         if elapsed > MAX_PING_MS:
             return None
 
@@ -310,11 +310,3 @@ async def process_proxy(proxy: dict) -> dict | None:
         return await check_web(proxy)
 
     return None
-
-
-# ─── Флаги стран ───────────────────────────────────────────────────────
-def _country_flag(code: str) -> str:
-    """Преобразует код страны в emoji-флаг."""
-    if not code or len(code) != 2:
-        return "🏳️"
-    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code.upper())
