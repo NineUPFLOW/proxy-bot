@@ -32,14 +32,6 @@ logger = logging.getLogger("bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
 
-# ─── Публикация ───
-MT_PUBLISH_MAX = 15
-MAX_WEB_PUBLISH = 3
-MAX_SOCKS5_PUBLISH = 1
-SEND_DELAY = 3
-MAX_SEND_RETRIES = 3
-CONCURRENCY = 20
-
 
 def dedup_by_ip_port(proxies: list) -> list:
     best = {}
@@ -131,34 +123,4 @@ async def run(bot: Bot):
     web_ok = [p for p in working if p["protocol"] == "WEB"]
     socks5_ok = [p for p in working if p["protocol"] == "SOCKS5"]
 
-    logger.info("Рабочие для публикации: MTPROTO=%s | WEB=%s | SOCKS5=%s", len(mtproto_ok), len(web_ok), len(socks5_ok))
-
-    selected = []
-    selected.extend(mtproto_ok[:MT_PUBLISH_MAX])
-    selected.extend(web_ok[:MAX_WEB_PUBLISH])
-    selected.extend(socks5_ok[:MAX_SOCKS5_PUBLISH])
-
-    selected = dedup_by_ip_port(selected)
-
-    for p in selected:
-        await send_with_retry(bot, p)
-        await asyncio.sleep(SEND_DELAY)
-
-    logger.info("✅ Публикация завершена")
-
-
-async def main():
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    try:
-        await run(bot)
-    finally:
-        await close_http_session()
-        await bot.session.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-    logger.info("✅ Бот успешно завершил цикл!")
+    logger.info("Рабочие для публикации: MTPROTO=%s | WEB=%s | SOCKS5=%s", len(mtproto_ok), len(web_ok), len(socks5
