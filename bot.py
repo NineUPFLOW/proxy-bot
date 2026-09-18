@@ -21,12 +21,15 @@ from checker import process_proxy, close_http_session
 from formatter import format_message, build_keyboard
 import state
 
+# ─── Логирование ────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    force=True,   # перезаписать любые ранее установленные хендлеры
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot")
 
+# ─── Конфигурация ───────────────────────────────────────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
@@ -38,7 +41,10 @@ SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
 
 
-async def check_with_semaphore(sem, raw):
+# ═══════════════════════════════════════════════════════════════════════
+#  Проверка прокси с ограничением параллелизма
+# ═══════════════════════════════════════════════════════════════════════
+async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
     async with sem:
         try:
             return await process_proxy(raw)
@@ -47,6 +53,9 @@ async def check_with_semaphore(sem, raw):
             return None
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Отправка с retry
+# ═══════════════════════════════════════════════════════════════════════
 async def send_with_retry(bot: Bot, p: dict) -> bool:
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
@@ -59,8 +68,10 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
             logger.info("Опубликован %s #%s", p["protocol"], p["id"])
             return True
         except TelegramRetryAfter as e:
-            logger.warning("Flood control, ждём %ss (попытка %s/%s)",
-                           e.retry_after, attempt, MAX_SEND_RETRIES)
+            logger.warning(
+                "Flood control, ждём %ss (попытка %s/%s)",
+                e.retry_after, attempt, MAX_SEND_RETRIES,
+            )
             await asyncio.sleep(e.retry_after + 1)
         except TelegramAPIError as e:
             logger.error("Ошибка публикации %s #%s: %s",
@@ -69,17 +80,24 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
         except Exception as e:
             logger.error("Неожиданная ошибка публикации: %s", e)
             return False
-    logger.error("Не удалось отправить %s #%s после %s попыток",
-                 p["protocol"], p.get("id"), MAX_SEND_RETRIES)
+    logger.error(
+        "Не удалось отправить %s #%s после %s попыток",
+        p["protocol"], p.get("id"), MAX_SEND_RETRIES,
+    )
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Основной цикл
+# ═══════════════════════════════════════════════════════════════════════
 async def run(bot: Bot):
     # 0. Инициализация состояния
+    logger.info("Инициализация состояния...")
     state.init_db()
     state.cleanup()
 
     # 1. Сбор
+    logger.info("Сбор прокси из источников...")
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
@@ -97,8 +115,10 @@ async def run(bot: Bot):
 
     # 3. Фильтрация уже просканированных
     fresh_raw = state.filter_unseen(unique_raw)
-    logger.info("Новых для сканирования: %s (пропущено: %s)",
-                len(fresh_raw), len(unique_raw) - len(fresh_raw))
+    logger.info(
+        "Новых для сканирования: %s (пропущено: %s)",
+        len(fresh_raw), len(unique_raw) - len(fresh_raw),
+    )
 
     if not fresh_raw:
         logger.info("Нет новых прокси для проверки")
@@ -158,3 +178,28 @@ async def run(bot: Bot):
     # 9. Закрытие ресурсов
     await close_http_session()
     logger.info("Цикл завершён")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Точка входа
+# ═══════════════════════════════════════════════════════════════════════
+async def main():
+    logger.info("═══ Запуск Proxy Bot ═══")
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+    try:
+        await run(bot)
+    except Exception as e:
+        logger.exception("Критическая ошибка в run(): %s", e)
+        raise
+    finally:
+        await bot.session.close()
+        logger.info("═══ Завершение Proxy Bot ═══")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
