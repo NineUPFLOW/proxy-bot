@@ -2,7 +2,6 @@
 Персистентное состояние.
 Дедупликация через SQLite + защита от повторных публикаций.
 """
-
 import sqlite3
 import hashlib
 import time
@@ -154,4 +153,5 @@ def cleanup():
         conn.execute("DELETE FROM seen_proxies WHERE last_seen < ?", (seen_cutoff,))
         conn.execute("DELETE FROM published_proxies WHERE published_at < ?", (published_cutoff,))
         conn.execute("DELETE FROM source_stats WHERE last_success < ?", (stats_cutoff,))
+
     logger.info("Очистка состояния выполнена")
