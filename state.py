@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent / "proxy_state.db"
 
 # TTL для записей (в секундах)
-SEEN_TTL = 6 * 3600        # 6 часов — не сканировать повторно
-PUBLISHED_TTL = 24 * 3600  # 24 часа — не публиковать повторно
-SOURCE_STATS_TTL = 7 * 24 * 3600  # 7 дней — статистика источников
+SEEN_TTL = 6 * 3600              # 6 часов — не сканировать повторно
+PUBLISHED_TTL = 24 * 3600        # 24 часа — не публиковать повторно
+SOURCE_STATS_TTL = 7 * 24 * 3600 # 7 дней — статистика источников
 
 
 def _proxy_hash(proxy: dict) -> str:
@@ -88,7 +88,7 @@ def is_seen(proxy: dict) -> bool:
     with _connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM seen_proxies WHERE hash = ? AND last_seen > ?",
-            (h, cutoff)
+            (h, cutoff),
         ).fetchone()
         return row is not None
 
@@ -99,7 +99,8 @@ def mark_seen(proxy: dict):
     now = time.time()
     with _connect() as conn:
         conn.execute("""
-            INSERT INTO seen_proxies (hash, ip, port, protocol, first_seen, last_seen, check_count)
+            INSERT INTO seen_proxies
+                (hash, ip, port, protocol, first_seen, last_seen, check_count)
             VALUES (?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(hash) DO UPDATE SET
                 last_seen = excluded.last_seen,
@@ -114,7 +115,7 @@ def is_published(proxy: dict) -> bool:
     with _connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM published_proxies WHERE hash = ? AND published_at > ?",
-            (h, cutoff)
+            (h, cutoff),
         ).fetchone()
         return row is not None
 
@@ -127,8 +128,10 @@ def mark_published(proxy: dict):
             INSERT OR REPLACE INTO published_proxies
                 (hash, ip, port, protocol, published_at, ping_ms)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (h, proxy["ip"], proxy["port"], proxy["protocol"],
-              time.time(), proxy.get("ping", 0)))
+        """, (
+            h, proxy["ip"], proxy["port"], proxy["protocol"],
+            time.time(), proxy.get("ping", 0),
+        ))
 
 
 def filter_unseen(proxies: list[dict]) -> list[dict]:
@@ -146,7 +149,8 @@ def update_source_stats(url: str, fetched: int, working: int):
     now = time.time()
     with _connect() as conn:
         conn.execute("""
-            INSERT INTO source_stats (url, total_fetched, total_working, last_success, consecutive_failures)
+            INSERT INTO source_stats
+                (url, total_fetched, total_working, last_success, consecutive_failures)
             VALUES (?, ?, ?, ?, 0)
             ON CONFLICT(url) DO UPDATE SET
                 total_fetched = total_fetched + excluded.total_fetched,
@@ -187,8 +191,16 @@ def cleanup():
     """Удаляет устаревшие записи."""
     now = time.time()
     with _connect() as conn:
-        conn.execute("DELETE FROM seen_proxies WHERE last_seen < ?", (now - SEEN_TTL * 2,))
-        conn.execute("DELETE FROM published_proxies WHERE published_at < ?", (now - PUBLISHED_TTL * 2,))
-        conn.execute("DELETE FROM source_stats WHERE last_success < ? AND last_failure < ?",
-                     (now - SOURCE_STATS_TTL, now - SOURCE_STATS_TTL))
+        conn.execute(
+            "DELETE FROM seen_proxies WHERE last_seen < ?",
+            (now - SEEN_TTL * 2,),
+        )
+        conn.execute(
+            "DELETE FROM published_proxies WHERE published_at < ?",
+            (now - PUBLISHED_TTL * 2,),
+        )
+        conn.execute(
+            "DELETE FROM source_stats WHERE last_success < ? AND last_failure < ?",
+            (now - SOURCE_STATS_TTL, now - SOURCE_STATS_TTL),
+        )
     logger.info("Очистка состояния выполнена")
