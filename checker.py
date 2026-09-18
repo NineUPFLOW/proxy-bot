@@ -1,7 +1,9 @@
 """
 Проверка прокси. Приоритет — MTProto для РФ.
-Работает через GitHub Secrets.
+Увеличенные таймауты для GitHub runner.
+Кэш геолокации, retry при 429.
 """
+
 import asyncio
 import hashlib
 import ipaddress
@@ -16,23 +18,35 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
-for name in ("telethon", "telethon.network", "telethon.client", "asyncio"):
+for name in (
+    "telethon", "telethon.network", "telethon.client",
+    "telethon.network.mtprotosender", "telethon.network.connection",
+    "asyncio",
+):
     logging.getLogger(name).setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
-MAX_PING_MS = 3000
-MAX_PING_WEB_MS = 3000
+# ─── Лимиты ────────────────────────────────────────────────────────────
+MAX_PING_MS = 8000
+MAX_PING_WEB_MS = 5000
 CHECK_TIMEOUT = 8
 WEB_CHECK_TIMEOUT = 10
+
 MT_ATTEMPTS = 3
 MT_REQUIRED = 2
+
+PROTO_BONUS = {
+    "MTPROTO": 10000,
+    "WEB": 5000,
+    "SOCKS5": 0,
+}
 
 
 def compute_score(proxy: dict) -> int:
     proto = proxy.get("protocol", "").upper()
     ping = proxy.get("ping", 0)
-    base = {"MTPROTO": 10000, "WEB": 5000, "SOCKS5": 0}.get(proto, 0)
+    base = PROTO_BONUS.get(proto, 0)
     return base - min(ping, 5000)
 
 
@@ -105,7 +119,8 @@ async def geolocate(ip: str) -> dict:
         for attempt in range(3):
             try:
                 async with session.get(
-                    f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,isp,query",
+                    f"http://ip-api.com/json/{ip}"
+                    "?fields=status,country,countryCode,city,isp,query",
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as r:
                     if r.status == 429:
@@ -157,7 +172,9 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
         if not client.is_connected():
             return None
 
-        await asyncio.wait_for(client(GetConfigRequest()), timeout=CHECK_TIMEOUT)
+        await asyncio.wait_for(
+            client(GetConfigRequest()), timeout=CHECK_TIMEOUT
+        )
         return int((asyncio.get_running_loop().time() - t0) * 1000)
     except (asyncio.TimeoutError, asyncio.CancelledError, ConnectionError, OSError):
         return None
@@ -221,15 +238,26 @@ async def check_socks5(proxy: dict) -> dict | None:
     )
     try:
         t0 = asyncio.get_running_loop().time()
-        async with aiohttp.ClientSession(connector=connector, connector_owner=False) as session:
+        async with aiohttp.ClientSession(
+            connector=connector, connector_owner=False
+        ) as session:
             try:
-                async with session.get(TEST_URL_TG, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT), allow_redirects=False) as r:
+                async with session.get(
+                    TEST_URL_TG,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                    allow_redirects=False,
+                ) as r:
                     if r.status >= 500:
                         return None
             except Exception:
                 return None
+
             try:
-                async with session.get(TEST_URL_RU, timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT), allow_redirects=False) as r:
+                async with session.get(
+                    TEST_URL_RU,
+                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
+                    allow_redirects=False,
+                ) as r:
                     if r.status >= 500:
                         return None
             except Exception:
@@ -253,33 +281,18 @@ async def check_socks5(proxy: dict) -> dict | None:
 
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
-    secret = raw.get("secret", "")
 
     if proto == "MTPROTO":
-        if not secret.startswith("ee"):
+        if not raw.get("secret", "").startswith("ee"):
             return None
         return await check_mtproto(raw)
 
     if proto == "WEB":
-        if not secret.startswith("dd"):
+        if not raw.get("secret", "").startswith("dd"):
             return None
         return await check_mtproto(raw)
 
     if proto == "SOCKS5":
         return await check_socks5(raw)
 
-    # фоллбэк любой формат
-    host = raw.get("ip") or raw.get("server") or raw.get("server", "")
-    port = raw.get("port") or raw.get("port", 443)
-    secret = raw.get("secret", "")
-
-    if not host or not port:
-        return None
-
-    new_raw = {
-        "protocol": "MTPROTO" if proto == "MTPROTO" else ("WEB" if proto == "WEB" else "SOCKS5"),
-        "ip": host,
-        "port": int(port),
-        "secret": secret,
-    }
-    return await process_proxy(new_raw)
+    return None
