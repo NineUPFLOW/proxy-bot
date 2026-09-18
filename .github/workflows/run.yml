@@ -2,7 +2,7 @@ name: Proxy Bot
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # каждые 30 минут
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -13,24 +13,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run:
+  run-bot:
+    name: Сбор · Проверка · Публикация
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Restore state cache (fallback)
+        uses: actions/cache@v4
+        with:
+          path: proxy_state.db
+          key: proxy-state-${{ github.run_id }}
+          restore-keys: |
+            proxy-state-
+
+      - name: State status
+        run: |
+          if [ -f proxy_state.db ]; then
+            echo "✅ Состояние найдено: $(du -h proxy_state.db | cut -f1)"
+          else
+            echo "ℹ️ Первый запуск — БД будет создана"
+          fi
 
       - name: Run bot
         env:
@@ -39,15 +58,39 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-        run: python bot.py
+        run: python -u bot.py
 
-      - name: Commit state
+      - name: Show state stats
+        if: always()
+        run: |
+          if [ -f proxy_state.db ]; then
+            echo "─── State statistics ───"
+            python - <<'PY'
+          import sqlite3
+          try:
+              conn = sqlite3.connect("proxy_state.db")
+              seen = conn.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
+              pub = conn.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+              print(f" seen_proxies      : {seen}")
+              print(f" published_proxies : {pub}")
+              conn.close()
+          except Exception as e:
+              print(f" ⚠️ Failed to read DB: {e}")
+          PY
+          else
+            echo "⚠️ proxy_state.db is missing"
+          fi
+
+      - name: Commit state to repository
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -f proxy_state.db ]; then
-            git add proxy_state.db
-            git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
-            git push || true
+          git add -f proxy_state.db
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update proxy_state.db [skip ci]"
+            git push
+            echo "✅ Состояние сохранено в репозиторий"
+          else
+            echo "ℹ️ Изменений в state нет"
           fi
