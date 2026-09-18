@@ -1,7 +1,6 @@
 <div align="center">
 
-# 🔐 Proxy Bot
-
+# 🔐 Proxy Bot.
 **Автоматический сбор, проверка и публикация рабочих прокси в Telegram**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
