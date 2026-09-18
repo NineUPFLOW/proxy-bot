@@ -1,30 +1,76 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  Telegram Proxy Bot — Workflow
+#  ───────────────────────────────────────────────────────────────────
+#  Запускает бота по расписанию, сохраняет состояние между запусками,
+#  чтобы прокси не сканировались и не публиковались повторно.
+# ═══════════════════════════════════════════════════════════════════════
+
 name: Proxy Bot
 
 on:
   schedule:
     # Запуск в 07, 22, 37 и 52 минуты каждого часа.
-    # Эти минуты реже попадают в "час пик" GitHub — запуски приходят вовремя.
     - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
+# ─── Разрешения для работы с кэшем состояния ─────────────────────────
+permissions:
+  contents: read
+  actions: write
+
+# ─── Запрет параллельных запусков (важно для консистентности БД) ─────
+concurrency:
+  group: proxy-bot
+  cancel-in-progress: false
+
 jobs:
-  run:
+  run-bot:
+    name: Сбор · Проверка · Публикация
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      # ─────────────────────────────────────────────────────────────
+      # 1. Подготовка окружения
+      # ─────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
+      # ─────────────────────────────────────────────────────────────
+      # 2. Восстановление состояния из кэша
+      # ─────────────────────────────────────────────────────────────
+      - name: Restore proxy state
+        id: state-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: proxy_state.db
+          key: proxy-state-${{ github.run_id }}
+          restore-keys: |
+            proxy-state-
+
+      - name: State restore summary
+        run: |
+          if [ -f proxy_state.db ]; then
+            SIZE=$(du -h proxy_state.db | cut -f1)
+            echo "✅ Состояние восстановлено: $SIZE"
+          else
+            echo "ℹ️ Состояние не найдено — первый запуск, БД будет создана"
+          fi
+
+      # ─────────────────────────────────────────────────────────────
+      # 3. Запуск бота
+      # ─────────────────────────────────────────────────────────────
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -33,3 +79,41 @@ jobs:
           API_HASH: ${{ secrets.API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
         run: python bot.py
+
+      # ─────────────────────────────────────────────────────────────
+      # 4. Сохранение состояния в кэш
+      #    if: always() — сохраняем даже если бот упал,
+      #    чтобы не потерять уже просканированные прокси.
+      # ─────────────────────────────────────────────────────────────
+      - name: Save proxy state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: proxy_state.db
+          key: proxy-state-${{ github.run_id }}
+
+      # ─────────────────────────────────────────────────────────────
+      # 5. Диагностика — вывод статистики БД в лог
+      # ─────────────────────────────────────────────────────────────
+      - name: Show state stats
+        if: always()
+        run: |
+          if [ -f proxy_state.db ]; then
+            echo "─── Статистика состояния ───"
+            python - <<'PY'
+          import sqlite3
+          try:
+              conn = sqlite3.connect("proxy_state.db")
+              seen = conn.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
+              pub  = conn.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+              src  = conn.execute("SELECT COUNT(*) FROM source_stats").fetchone()[0]
+              print(f"  seen_proxies      : {seen}")
+              print(f"  published_proxies : {pub}")
+              print(f"  source_stats      : {src}")
+              conn.close()
+          except Exception as e:
+              print(f"  ⚠️ Не удалось прочитать БД: {e}")
+          PY
+          else
+            echo "⚠️ proxy_state.db отсутствует"
+          fi
