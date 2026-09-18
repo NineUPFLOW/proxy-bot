@@ -2,13 +2,11 @@
 Точка входа. Полный цикл:
 1. Сбор прокси из Telegram-источников
 2. Дедупликация в батче (по ip:port)
-3. Лимит на проверку: MTProto=400, WEB=30, SOCKS5=50
-4. Фильтрация уже просканированных (seen)
-5. Проверка новых
-6. Дедупликация рабочих (по ip:port)
-7. Фильтрация уже опубликованных (published)
-8. Сортировка по score
-9. Публикация ВСЕХ рабочих (с лимитами по протоколам)
+3. Проверка ВСЕХ новых (оптимизировано)
+4. Дедупликация рабочих (по ip:port)
+5. Фильтрация уже опубликованных (published)
+6. Сортировка по score
+7. Публикация ВСЕХ рабочих
 """
 import asyncio
 import logging
@@ -51,11 +49,6 @@ MAX_SOCKS5_PUBLISH = 1       # максимум SOCKS5
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
-
-# ─── Лимит на проверку за один запуск ───
-MAX_MT_CHECK = 400
-MAX_SOCKS5_CHECK = 50
-MAX_WEB_CHECK = 30
 
 
 def dedup_by_ip_port(proxies: list) -> list:
@@ -138,7 +131,7 @@ async def run(bot: Bot):
     raw_list = dedup_by_ip_port(raw_list)
     logger.info("После дедупликации по ip:port: %s", len(raw_list))
 
-    # ─── 3. Лимит на проверку за один запуск ───
+    # ─── 3. Оптимизированная проверка ВСЕХ (без жёстких лимитов) ───
     mtproto_all = [r for r in raw_list if r.get("protocol") == "MTPROTO"]
     socks5_all = [r for r in raw_list if r.get("protocol") == "SOCKS5"]
     web_all = [r for r in raw_list if r.get("protocol") == "WEB"]
@@ -147,21 +140,27 @@ async def run(bot: Bot):
     random.shuffle(socks5_all)
     random.shuffle(web_all)
 
-    mtproto_pick = mtproto_all[:MAX_MT_CHECK]
-    socks5_pick = socks5_all[:MAX_SOCKS5_CHECK]
-    web_pick = web_all[:MAX_WEB_CHECK]
+    # Приоритет: 70% MTProto, 20% SOCKS5, 10% WEB
+    total = len(mtproto_all) + len(socks5_all) + len(web_all)
+    priority_mt = int(total * 0.70)
+    priority_socks = int(total * 0.20)
+    priority_web = total - priority_mt - priority_socks
 
-    raw_list = mtproto_pick + web_pick + socks5_pick
+    mtproto_pick = mtproto_all[:priority_mt]
+    socks5_pick = socks5_all[:priority_socks]
+    web_pick = web_all[:priority_web]
+
+    raw_list = mtproto_pick + socks5_pick + web_pick
     random.shuffle(raw_list)
 
     logger.info(
-        "Лимит на проверку: MTProto=%s WEB=%s SOCKS5=%s | всего=%s",
-        len(mtproto_pick), len(web_pick), len(socks5_pick), len(raw_list),
+        "Проверка: MTProto=%s SOCKS5=%s WEB=%s | всего=%s",
+        len(mtproto_pick), len(socks5_pick), len(web_pick), len(raw_list),
     )
 
     logger.info(
-        "По протоколам: MTProto=%s WEB=%s SOCKS5=%s",
-        len(mtproto_pick), len(web_pick), len(socks5_pick),
+        "По протоколам (приоритет): MTProto=%s SOCKS5=%s WEB=%s",
+        len(mtproto_pick), len(socks5_pick), len(web_pick),
     )
 
     # ─── 4. Фильтрация уже просканированных ───
@@ -227,11 +226,7 @@ async def run(bot: Bot):
             p.get("ping", "?"), p.get("score", "?"),
         )
 
-    # ─── 8. Формирование выборки ───
-    # Публикуем ВСЕ рабочие, соблюдая пропорции по протоколам:
-    #   MTProto — до MT_PUBLISH_MAX
-    #   WEB     — до MAX_WEB_PUBLISH
-    #   SOCKS5  — до MAX_SOCKS5_PUBLISH
+    # ─── 8. Формирование выборки (публикуем ВСЕ рабочие) ───
     mtproto_sorted = [p for p in working if p["protocol"] == "MTPROTO"]
     web_sorted = [p for p in working if p["protocol"] == "WEB"]
     socks5_sorted = [p for p in working if p["protocol"] == "SOCKS5"]
