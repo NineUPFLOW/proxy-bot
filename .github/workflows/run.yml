@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -89,8 +90,9 @@ jobs:
           git add -f proxy_state.db
           if ! git diff --staged --quiet; then
             git commit -m "chore: update proxy_state.db [skip ci]"
-            git push
-            echo "✅ Состояние сохранено в репозиторий"
+            git pull --rebase --autostash origin main || true
+            git push || echo "⚠️ Push отклонён — повторим в следующем запуске"
+            echo "✅ Состояние обработано"
           else
             echo "ℹ️ Изменений в state нет"
           fi
