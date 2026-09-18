@@ -2,12 +2,13 @@
 Точка входа. Полный цикл:
 1. Сбор прокси из Telegram-источников
 2. Дедупликация в батче (по ip:port)
-3. Фильтрация уже просканированных (seen)
-4. Проверка всех новых
-5. Дедупликация рабочих (по ip:port) — КРИТИЧНО
-6. Фильтрация уже опубликованных (published)
-7. Сортировка по score
-8. Публикация топ-6
+3. Лимит на проверку: MTProto=400, WEB=30, SOCKS5=50
+4. Фильтрация уже просканированных (seen)
+5. Проверка новых
+6. Дедупликация рабочих (по ip:port)
+7. Фильтрация уже опубликованных (published)
+8. Сортировка по score
+9. Публикация топ-6
 """
 
 import asyncio
@@ -44,12 +45,18 @@ logger = logging.getLogger("bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-PUBLISH_COUNT = 10
+# ─── Публикация ───
+PUBLISH_COUNT = 6
 MAX_SOCKS5_PUBLISH = 1
 MAX_WEB_PUBLISH = 3
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
+
+# ─── Лимит на проверку за один запуск ───
+MAX_MT_CHECK = 400
+MAX_SOCKS5_CHECK = 50
+MAX_WEB_CHECK = 30
 
 
 def dedup_by_ip_port(proxies: list) -> list:
@@ -109,6 +116,7 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
 
 
 async def run(bot: Bot):
+    # ─── 0. Инициализация состояния ───
     logger.info("Инициализация состояния...")
     state.init_db()
     state.cleanup()
@@ -120,26 +128,47 @@ async def run(bot: Bot):
         seen_count, pub_count,
     )
 
+    # ─── 1. Сбор ───
     logger.info("Сбор прокси из источников...")
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
         return
 
-    # ─── Дедупликация по ip:port ───
+    # ─── 2. Дедупликация по ip:port ───
     raw_list = dedup_by_ip_port(raw_list)
     logger.info("После дедупликации по ip:port: %s", len(raw_list))
 
-    mtproto_cnt = sum(1 for r in raw_list if r.get("protocol") == "MTPROTO")
-    web_cnt = sum(1 for r in raw_list if r.get("protocol") == "WEB")
-    socks5_cnt = sum(1 for r in raw_list if r.get("protocol") == "SOCKS5")
+    # ─── 3. Лимит на проверку за один запуск ───
+    mtproto_all = [r for r in raw_list if r.get("protocol") == "MTPROTO"]
+    socks5_all = [r for r in raw_list if r.get("protocol") == "SOCKS5"]
+    web_all = [r for r in raw_list if r.get("protocol") == "WEB"]
+
+    random.shuffle(mtproto_all)
+    random.shuffle(socks5_all)
+    random.shuffle(web_all)
+
+    mtproto_pick = mtproto_all[:MAX_MT_CHECK]
+    socks5_pick = socks5_all[:MAX_SOCKS5_CHECK]
+    web_pick = web_all[:MAX_WEB_CHECK]
+
+    raw_list = mtproto_pick + web_pick + socks5_pick
+    random.shuffle(raw_list)
+
+    logger.info(
+        "Лимит на проверку: MTProto=%s WEB=%s SOCKS5=%s | всего=%s",
+        len(mtproto_pick), len(web_pick), len(socks5_pick), len(raw_list),
+    )
+
+    mtproto_cnt = len(mtproto_pick)
+    web_cnt = len(web_pick)
+    socks5_cnt = len(socks5_pick)
     logger.info(
         "По протоколам: MTProto=%s WEB=%s SOCKS5=%s",
         mtproto_cnt, web_cnt, socks5_cnt,
     )
 
-    random.shuffle(raw_list)
-
+    # ─── 4. Фильтрация уже просканированных ───
     fresh_raw = state.filter_unseen(raw_list)
     logger.info(
         "Новых для сканирования: %s (пропущено: %s)",
@@ -149,17 +178,21 @@ async def run(bot: Bot):
         logger.info("Нет новых прокси для проверки")
         return
 
+    # ─── 5. Проверка ───
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(
         *[check_with_semaphore(sem, r) for r in fresh_raw]
     )
     working = [r for r in results if r]
 
-    # ─── ДЕДУПЛИКАЦИЯ РАБОЧИХ ПО IP:PORT ───
+    # ─── Дедупликация рабочих ───
     before = len(working)
     working = dedup_by_ip_port(working)
     if before != len(working):
-        logger.info("Рабочих после дедупликации: %s (убрано %s)", len(working), before - len(working))
+        logger.info(
+            "Рабочих после дедупликации: %s (убрано %s)",
+            len(working), before - len(working),
+        )
 
     mtproto_ok = [p for p in working if p["protocol"] == "MTPROTO"]
     web_ok = [p for p in working if p["protocol"] == "WEB"]
@@ -174,7 +207,7 @@ async def run(bot: Bot):
         logger.info("Ни один прокси не прошёл проверку")
         return
 
-    # ─── Фильтрация уже опубликованных ───
+    # ─── 6. Фильтрация уже опубликованных ───
     before_filter = len(working)
     working = state.filter_unpublished(working)
     skipped = before_filter - len(working)
@@ -187,6 +220,7 @@ async def run(bot: Bot):
         logger.info("Все рабочие прокси уже публиковались — публиковать нечего")
         return
 
+    # ─── 7. Сортировка по score ───
     working.sort(key=lambda p: p.get("score", 0), reverse=True)
 
     logger.info("Топ-10 по качеству:")
@@ -197,6 +231,7 @@ async def run(bot: Bot):
             p.get("ping", "?"), p.get("score", "?"),
         )
 
+    # ─── 8. Формирование выборки ───
     mtproto_sorted = [p for p in working if p["protocol"] == "MTPROTO"]
     web_sorted = [p for p in working if p["protocol"] == "WEB"]
     socks5_sorted = [p for p in working if p["protocol"] == "SOCKS5"]
@@ -212,14 +247,19 @@ async def run(bot: Bot):
     if remaining > 0 and socks5_sorted:
         selected.extend(socks5_sorted[:min(remaining, MAX_SOCKS5_PUBLISH)])
 
-    # ─── ФИНАЛЬНАЯ ДЕДУПЛИКАЦИЯ selected ───
+    # Финальная дедупликация
     selected = dedup_by_ip_port(selected)
 
     if not selected:
         logger.info("Нет прокси для публикации")
         return
 
-    logger.info("Публикуем %s прокси", len(selected))
+    logger.info(
+        "Публикуем %s из %s доступных (запрошено %s)",
+        len(selected), len(working), PUBLISH_COUNT,
+    )
+
+    # ─── 9. Публикация ───
     published_ok = []
     published_keys = set()
     for p in selected:
