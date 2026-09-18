@@ -18,6 +18,7 @@ PROTO_LABEL = {
     "WEB": "WEB (TgWebProxy)",
 }
 
+
 # ─── Индикаторы качества ───────────────────────────────────────────────
 def _ping_badge(ping_ms: int) -> str:
     """Возвращает emoji-индикатор качества пинга."""
@@ -75,7 +76,6 @@ def format_message(p: dict) -> str:
     proto = p["protocol"].upper()
     flag = p.get("flag", "🏳️")
 
-    # Экранирование недоверенных данных
     country = html.escape(str(p.get("country", "Unknown")))
     city = html.escape(str(p.get("city", "Unknown")))
     provider = html.escape(str(p.get("provider", "Unknown")))
@@ -102,7 +102,6 @@ def format_message(p: dict) -> str:
         f"└ {ip_label}: <code>{ip_display}</code>\n"
     )
 
-    # ─── Футер с предупреждениями для РУ-сегмента ───
     footer_parts = []
 
     if proto == "SOCKS5":
