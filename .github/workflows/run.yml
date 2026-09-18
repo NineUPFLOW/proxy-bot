@@ -1,7 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════
-#  Telegram Proxy Bot — Workflow
+# Telegram Proxy Bot — Workflow
 # ═══════════════════════════════════════════════════════════════════════
-
 name: Proxy Bot
 
 on:
@@ -25,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5          # ← обновлено
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6      # ← обновлено
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -38,7 +37,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ─── Восстановление + сохранение в одном шаге ───
       - name: Restore / Save proxy state
         uses: actions/cache@v4
         with:
@@ -74,14 +72,14 @@ jobs:
           try:
               conn = sqlite3.connect("proxy_state.db")
               seen = conn.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
-              pub  = conn.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
-              src  = conn.execute("SELECT COUNT(*) FROM source_stats").fetchone()[0]
-              print(f"  seen_proxies      : {seen}")
-              print(f"  published_proxies : {pub}")
-              print(f"  source_stats      : {src}")
+              pub = conn.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+              src = conn.execute("SELECT COUNT(*) FROM source_stats").fetchone()[0]
+              print(f" seen_proxies      : {seen}")
+              print(f" published_proxies : {pub}")
+              print(f" source_stats      : {src}")
               conn.close()
           except Exception as e:
-              print(f"  ⚠️ Failed to read DB: {e}")
+              print(f" ⚠️ Failed to read DB: {e}")
           PY
           else
             echo "⚠️ proxy_state.db is missing"
