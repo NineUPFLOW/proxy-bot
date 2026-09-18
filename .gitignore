@@ -2,4 +2,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-proxy_state.db
+.env
+session/
+*.session
+seen.json
+
+# proxy_state.db — НЕ игнорируем, коммитим для сохранения истории
