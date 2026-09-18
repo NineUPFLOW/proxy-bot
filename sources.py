@@ -298,7 +298,7 @@ async def fetch_from_telegram_sources() -> list:
         )
         await client.connect()
 
-        if not await is_user_authorized():  # <--- добавлено
+        if not await client.is_user_authorized():
             logger.warning("TG_SESSION не авторизована")
             return []
 
