@@ -83,7 +83,7 @@ jobs:
             echo "⚠️ proxy_state.db is missing"
           fi
 
-          - name: Commit state to repository
+      - name: Commit state to repository
         if: always()
         run: |
           git config user.name "github-actions[bot]"
