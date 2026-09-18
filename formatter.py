@@ -1,26 +1,10 @@
 """
-Аккуратное оформление сообщений с прокси.
+Оформление сообщений с прокси.
 """
 
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  ПРОТОКОЛЫ
-# ═══════════════════════════════════════════════════════════════════════
-PROTO_TITLE = {
-    "MTPROTO": "MTProto · Fake TLS",
-    "SOCKS5": "SOCKS5",
-    "WEB": "WEB · TgWebProxy",
-}
-
-PROTO_ICON = {
-    "MTPROTO": "🔐",
-    "SOCKS5": "🧦",
-    "WEB": "🌐",
-}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -52,15 +36,18 @@ def format_message(p: dict) -> str:
     provider = escape(str(p.get("provider", "Unknown")))
     ip_display = escape(str(p.get("ip", "")))
     ping = int(p.get("ping", 0))
-    title = PROTO_TITLE.get(proto, proto)
+    pid = p.get("id", 0)
 
     return (
-        f"{flag} <b>{country}</b>\n"
-        f"<blockquote>{title}\n"
+        f"🔗 <b>#{pid}</b>: {flag} <b>{country}</b>\n"
         f"\n"
-        f"📍 <code>{ip_display}</code>\n"
-        f"🌐 {ping} ms · {city}\n"
-        f"🏢 {provider}</blockquote>"
+        f"┌ ✅ <b>Название:</b> {flag} {country}\n"
+        f"├ 🔗 <b>Протокол:</b> {proto}\n"
+        f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
+        f"├ 📍 <b>Страна:</b> {flag} {country}\n"
+        f"├ 📍 <b>Город:</b> {city}\n"
+        f"├ 🏠 <b>Провайдер:</b> {provider}\n"
+        f"└ <b>IP:</b> <code>{ip_display}</code>"
     )
 
 
@@ -68,10 +55,8 @@ def format_message(p: dict) -> str:
 #  КЛАВИАТУРА
 # ═══════════════════════════════════════════════════════════════════════
 def build_keyboard(p: dict):
-    proto = p["protocol"].upper()
     link = build_connect_link(p)
-    icon = PROTO_ICON.get(proto, "🔗")
 
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f"{icon} Подключить", url=link)
+        InlineKeyboardButton(text="🔑 Добавить proxy в Telegram", url=link)
     ]])
