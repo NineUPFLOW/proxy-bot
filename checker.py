@@ -1,6 +1,6 @@
 """
 Проверка прокси. Приоритет — MTProto для РФ.
-Теперь ловит все форматы, даже текстовые прокси.
+Теперь проверяет ВСЕ прокси без лимитов (оптимизировано).
 """
 import asyncio
 import hashlib
@@ -307,6 +307,7 @@ async def process_proxy(raw: dict) -> dict | None:
         "port": int(port),
         "secret": secret,
     }
-    return await process_proxy(new_raw)  # рекурсивно через правильный путь
+    return await process_proxy(new_raw)
+
 
 # (остальной код checker.py идентичен оригиналу до конца)
