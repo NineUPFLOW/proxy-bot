@@ -1,6 +1,8 @@
 """
 Telegram Proxy Bot 2026.
-Работает ТОЛЬКО через GitHub Secrets.
+- Дедупликация по IP:port на всех этапах
+- Защита от повторной публикации в одном запуске
+- Приоритет MTProto для РФ
 """
 
 import asyncio
@@ -48,19 +50,22 @@ PUBLISH_COUNT = 6
 MAX_SOCKS5_PUBLISH = 1
 MAX_WEB_PUBLISH = 3
 SEND_DELAY = 3
-MAX_SEND_RETRIES = 3          # ← исправлено: константа определена
+MAX_SEND_RETRIES = 3
 
 # ─── Проверка ───
 CONCURRENCY = 20
 
-# ─── Лимиты на проверку за один запуск ───
+# ─── Лимиты на сканирование ───
 MAX_MT_CHECK = 200
 MAX_WEB_CHECK = 50
 MAX_SOCKS5_CHECK = 20
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Дедупликация
+# ═══════════════════════════════════════════════════════════════════════
 def dedup_by_ip_port(proxies: list) -> list:
-    """Убирает дубликаты по IP:port, оставляя лучший по score."""
+    """Оставляет один прокси на каждый IP:port (лучший по score, если есть)."""
     best = {}
     for p in proxies:
         key = (p["ip"], p["port"])
@@ -69,8 +74,10 @@ def dedup_by_ip_port(proxies: list) -> list:
     return list(best.values())
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Проверка одного прокси
+# ═══════════════════════════════════════════════════════════════════════
 async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
-    """Проверка одного прокси с ограничением параллелизма."""
     async with sem:
         try:
             result = await process_proxy(raw)
@@ -82,8 +89,10 @@ async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
             return None
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Отправка с retry
+# ═══════════════════════════════════════════════════════════════════════
 async def send_with_retry(bot: Bot, p: dict) -> bool:
-    """Отправка сообщения с обработкой flood-control."""
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
             await bot.send_message(
@@ -92,24 +101,23 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
                 reply_markup=build_keyboard(p),
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
-            logger.info("✅ Опубликован %s #%s", p["protocol"], p["id"])
+            logger.info("✅ Опубликован %s %s:%s", p["protocol"], p["ip"], p["port"])
             return True
         except TelegramRetryAfter as e:
-            logger.warning("Flood control, ждём %ss (попытка %s/%s)",
-                           e.retry_after, attempt, MAX_SEND_RETRIES)
+            logger.warning("Flood control, ждём %ss", e.retry_after)
             await asyncio.sleep(e.retry_after + 1)
         except TelegramAPIError as e:
-            logger.error("Ошибка публикации %s #%s: %s",
-                         p["protocol"], p.get("id"), e)
+            logger.error("Ошибка публикации: %s", e)
             return False
         except Exception as e:
             logger.error("Неожиданная ошибка: %s", e)
             return False
-
-    logger.error("Не удалось отправить после %s попыток", MAX_SEND_RETRIES)
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Основной цикл
+# ═══════════════════════════════════════════════════════════════════════
 async def run(bot: Bot):
     logger.info("🚀 Запуск прокси-бота...")
     state.init_db()
@@ -121,7 +129,7 @@ async def run(bot: Bot):
         logger.warning("Источники пусты")
         return
 
-    # ─── 2. Дедупликация ───
+    # ─── 2. Дедупликация ДО проверки ───
     raw_list = dedup_by_ip_port(raw_list)
 
     # ─── 3. Лимиты по протоколам ───
@@ -129,7 +137,7 @@ async def run(bot: Bot):
     socks5 = [r for r in raw_list if r.get("protocol") == "SOCKS5"]
     web = [r for r in raw_list if r.get("protocol") == "WEB"]
 
-    logger.info("Собрано: MTProto=%s WEB=%s SOCKS5=%s | всего=%s",
+    logger.info("После дедупа: MTProto=%s WEB=%s SOCKS5=%s | всего=%s",
                 len(mtproto), len(web), len(socks5), len(raw_list))
 
     random.shuffle(mtproto)
@@ -158,25 +166,30 @@ async def run(bot: Bot):
     )
     working = [r for r in results if r]
 
+    # ─── 6. Дедупликация ПОСЛЕ проверки (ключевой фикс!) ───
+    working = dedup_by_ip_port(working)
+
     mt_ok = [p for p in working if p["protocol"] == "MTPROTO"]
     web_ok = [p for p in working if p["protocol"] == "WEB"]
     socks_ok = [p for p in working if p["protocol"] == "SOCKS5"]
 
-    logger.info("Рабочих: MTPROTO=%s WEB=%s SOCKS5=%s | всего=%s",
+    logger.info("Рабочих после дедупа: MTPROTO=%s WEB=%s SOCKS5=%s | всего=%s",
                 len(mt_ok), len(web_ok), len(socks_ok), len(working))
 
     if not working:
         logger.info("Ни один прокси не прошёл проверку")
         return
 
-    # ─── 6. Фильтрация опубликованных ───
+    # ─── 7. Фильтрация опубликованных ───
     working = state.filter_unpublished(working)
+    working = dedup_by_ip_port(working)
+
     logger.info("Неопубликованных: %s", len(working))
     if not working:
         logger.info("Все рабочие прокси уже публиковались")
         return
 
-    # ─── 7. Сортировка по score ───
+    # ─── 8. Сортировка по score ───
     working.sort(key=lambda p: p.get("score", 0), reverse=True)
 
     logger.info("🏆 Топ-10 по качеству:")
@@ -185,7 +198,7 @@ async def run(bot: Bot):
                     p["protocol"], p["ip"], p["port"],
                     p.get("ping", "?"), p.get("score", "?"))
 
-    # ─── 8. Формирование выборки ───
+    # ─── 9. Формирование выборки ───
     mt_sorted = [p for p in working if p["protocol"] == "MTPROTO"]
     web_sorted = [p for p in working if p["protocol"] == "WEB"]
     socks_sorted = [p for p in working if p["protocol"] == "SOCKS5"]
@@ -200,21 +213,32 @@ async def run(bot: Bot):
     if remaining > 0 and socks_sorted:
         final.extend(socks_sorted[:min(remaining, MAX_SOCKS5_PUBLISH)])
 
+    # ─── 10. ФИНАЛЬНАЯ дедупликация ───
+    final = dedup_by_ip_port(final)
+
     if not final:
         logger.info("Нет прокси для публикации")
         return
 
-    # ─── 9. Публикация ───
+    # ─── 11. Публикация с защитой от дубликатов ───
     logger.info("Публикуем %s прокси", len(final))
-    published_ok = []
+    published_ips = set()
+    published_ok = 0
+
     for p in final:
+        key = (p["ip"], p["port"])
+        if key in published_ips:
+            logger.debug("Пропуск дубликата %s:%s", p["ip"], p["port"])
+            continue
+
         ok = await send_with_retry(bot, p)
         if ok:
-            published_ok.append(p)
+            published_ok += 1
+            published_ips.add(key)
             state.mark_published(p)
         await asyncio.sleep(SEND_DELAY)
 
-    logger.info("✅ Успешно опубликовано: %s", len(published_ok))
+    logger.info("✅ Успешно опубликовано: %s", published_ok)
 
 
 async def main():
