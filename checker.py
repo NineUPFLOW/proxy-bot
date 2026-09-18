@@ -1,5 +1,5 @@
 """
-Проверка прокси. Ужесточённые лимиты.
+Проверка прокси. Смягчённые лимиты для GitHub runner в США.
 Фильтр по странам, подходящим для РФ.
 """
 
@@ -26,22 +26,25 @@ for name in (
 
 logger = logging.getLogger(__name__)
 
-# ─── Лимиты (ужесточены) ───────────────────────────────────────────────
-MAX_PING_MS = 2500              # было 8000 — теперь отсеиваем медленные
-MAX_PING_WEB_MS = 2000
-CHECK_TIMEOUT = 6               # было 8
-WEB_CHECK_TIMEOUT = 8
+# ═══════════════════════════════════════════════════════════════════════
+#  ЛИМИТЫ (смягчены)
+# ═══════════════════════════════════════════════════════════════════════
+MAX_PING_MS = 10000             # максимум 10 сек
+MAX_PING_WEB_MS = 8000
+CHECK_TIMEOUT = 10
+WEB_CHECK_TIMEOUT = 12
 
-MT_ATTEMPTS = 3
-MT_REQUIRED = 3                 # было 2 — теперь требуем все 3 успешных
+MT_ATTEMPTS = 2                 # 2 попытки
+MT_REQUIRED = 1                 # достаточно 1 успешного handshake
 
+# ─── Приоритет протоколов ───
 PROTO_BONUS = {
     "MTPROTO": 10000,
     "WEB": 5000,
     "SOCKS5": 0,
 }
 
-# ─── Страны, подходящие для РФ (Европа + СНГ + Турция + Кавказ) ───────
+# ─── Страны, подходящие для РФ (Европа + СНГ + Турция + Кавказ + США) ─
 ALLOWED_COUNTRIES = {
     # СНГ
     "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
@@ -51,8 +54,12 @@ ALLOWED_COUNTRIES = {
     "PL", "CZ", "SK", "AT", "CH", "FR", "BE", "GB", "IE", "LU",
     # Южная и Восточная Европа
     "IT", "ES", "PT", "RO", "BG", "RS", "HU", "HR", "SI", "GR", "CY", "MT",
-    # Турция и Ближний Восток
+    # Турция
     "TR",
+    # Северная Америка
+    "US", "CA",
+    # Азия
+    "JP", "KR", "SG", "HK",
 }
 
 
@@ -153,7 +160,8 @@ async def geolocate(ip: str) -> dict:
 
 def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
     country_code = geo.get("countryCode", "")
-    if country_code not in ALLOWED_COUNTRIES:
+    # Пустой countryCode — тоже отсеиваем (не смогли определить)
+    if country_code and country_code not in ALLOWED_COUNTRIES:
         logger.debug("Отсев по стране: %s (%s)", ip, country_code)
         return None
 
@@ -171,9 +179,11 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict) -> dict | None:
     return proxy
 
 
-# ─── MTProto / WEB ─────────────────────────────────────────────────────
-
+# ═══════════════════════════════════════════════════════════════════════
+#  MTProto / WEB
+# ═══════════════════════════════════════════════════════════════════════
 async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
+    """Одна попытка handshake. Возвращает пинг в мс или None."""
     client = None
     try:
         client = TelegramClient(
@@ -210,6 +220,7 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
+    """MTProto/WEB: 2 попытки, достаточно 1 успешного handshake."""
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
@@ -223,8 +234,10 @@ async def check_mtproto(proxy: dict) -> dict | None:
         ping = await _one_mtproto_attempt(ip, port, secret)
         if ping is not None:
             pings.append(ping)
+            if len(pings) >= MT_REQUIRED:
+                break
         if attempt < MT_ATTEMPTS - 1:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
     if len(pings) < MT_REQUIRED:
         return None
@@ -240,9 +253,11 @@ async def check_mtproto(proxy: dict) -> dict | None:
     return _enrich(proxy, ip, avg_ping, geo)
 
 
-# ─── SOCKS5 ────────────────────────────────────────────────────────────
-
+# ═══════════════════════════════════════════════════════════════════════
+#  SOCKS5
+# ═══════════════════════════════════════════════════════════════════════
 async def check_socks5(proxy: dict) -> dict | None:
+    """SOCKS5: проверка через Telegram + ya.ru."""
     host = proxy["ip"]
     port = int(proxy["port"])
 
@@ -261,6 +276,7 @@ async def check_socks5(proxy: dict) -> dict | None:
         async with aiohttp.ClientSession(
             connector=connector, connector_owner=False
         ) as session:
+            # Telegram — обязательный
             try:
                 async with session.get(
                     TEST_URL_TG,
@@ -272,6 +288,7 @@ async def check_socks5(proxy: dict) -> dict | None:
             except Exception:
                 return None
 
+            # ya.ru — обязательный
             try:
                 async with session.get(
                     TEST_URL_RU,
@@ -299,8 +316,9 @@ async def check_socks5(proxy: dict) -> dict | None:
             pass
 
 
-# ─── Главная функция ───────────────────────────────────────────────────
-
+# ═══════════════════════════════════════════════════════════════════════
+#  Главная функция
+# ═══════════════════════════════════════════════════════════════════════
 async def process_proxy(raw: dict) -> dict | None:
     proto = raw.get("protocol", "").upper()
 
