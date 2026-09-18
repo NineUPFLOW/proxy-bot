@@ -15,38 +15,27 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 # ─── MTProto из tg:// ссылок ───────────────────────────────────────────
 MTPROTO_URLS = [
+    # SoliSpirit — эталонный источник, обновление каждые 12 часов
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
+    # Grim1313 — форк SoliSpirit, удобные форматы
     "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
+    # ALIILAPRO — ежедневное обновление
     "https://raw.githubusercontent.com/ALIILAPRO/MTProtoProxy/main/mtproto.txt",
 ]
 
-# RU-сегмент (маскировка под российские сервисы)
-# Правильный URL: https://github.com/kort0881/telegram-proxy-collector
+# ─── RU-специфичный источник (Fake-TLS под Yandex, VK, Gosuslugi) ──────
 RU_MTPROTO_URL = (
     "https://raw.githubusercontent.com/kort0881/"
     "telegram-proxy-collector/main/proxy_ru.txt"
 )
 
-# ─── SOCKS5 ────────────────────────────────────────────────────────────
+# ─── SOCKS5 (проверенные, автоматически обновляемые) ───────────────────
 SOCKS5_URLS = [
+    # monosans — обновление каждый час, сортировка по скорости
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-    "https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/socks5.txt",
-    "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/socks5_proxies.txt",
+    # proxifly — обновление каждые 5 минут, тысячи прокси
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt",
 ]
-
-# ─── JSON-источники MTProto ───────────────────────────────────────────
-# Правильный URL: https://github.com/Yagami200/free-mtproto-proxies
-YAGAMI_JSON = (
-    "https://raw.githubusercontent.com/Yagami200/"
-    "free-mtproto-proxies/main/data/proxies.json"
-)
-
-# Правильный URL: https://github.com/Chumbayoumba/free-telegram-proxy-russia-2026
-CHUMBAYOUMBA_JSON = (
-    "https://raw.githubusercontent.com/Chumbayoumba/"
-    "free-telegram-proxy-russia-2026/main/mtproto.json"
-)
 
 
 # ─── ЗАГРУЗЧИКИ ────────────────────────────────────────────────────────
@@ -131,52 +120,6 @@ def _parse_socks5_line(line: str):
         return None
 
 
-def _parse_yagami_json(items: list) -> list:
-    """Парсит ответ Yagami200/free-mtproto-proxies."""
-    result = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        host = item.get("host") or item.get("server")
-        port = item.get("port")
-        secret = item.get("secret")
-        if not all([host, port, secret]):
-            continue
-        if not secret.startswith("ee"):
-            continue
-        result.append({
-            "protocol": "MTPROTO",
-            "ip": host,
-            "port": int(port),
-            "secret": secret,
-            "raw": f"tg://proxy?server={host}&port={port}&secret={secret}",
-        })
-    return result
-
-
-def _parse_chumbayoumba_json(items: list) -> list:
-    """Парсит ответ Chumbayoumba/free-telegram-proxy-russia-2026."""
-    result = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        host = item.get("server") or item.get("host")
-        port = item.get("port")
-        secret = item.get("secret")
-        if not all([host, port, secret]):
-            continue
-        if not secret.startswith("ee"):
-            continue
-        result.append({
-            "protocol": "MTPROTO",
-            "ip": host,
-            "port": int(port),
-            "secret": secret,
-            "raw": f"tg://proxy?server={host}&port={port}&secret={secret}",
-        })
-    return result
-
-
 # ─── ГЛАВНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
 async def fetch_all_proxies() -> list:
     result = []
@@ -200,7 +143,7 @@ async def fetch_all_proxies() -> list:
                     added += 1
             logger.info("MTProto %s: %s → %s", url.split("/")[-2], len(lines), added)
 
-        # 2. RU MTProto
+        # 2. RU MTProto (Fake-TLS под российские сервисы)
         ru_lines = await _get_text(s, RU_MTPROTO_URL)
         added = 0
         for line in ru_lines:
@@ -210,25 +153,7 @@ async def fetch_all_proxies() -> list:
                 added += 1
         logger.info("RU MTProto: %s → %s", len(ru_lines), added)
 
-        # 3. Yagami200 JSON
-        yagami_data = await _get_json(s, YAGAMI_JSON)
-        if isinstance(yagami_data, list):
-            added = 0
-            for p in _parse_yagami_json(yagami_data):
-                add(p)
-                added += 1
-            logger.info("Yagami200 JSON: %s → %s", len(yagami_data), added)
-
-        # 4. Chumbayoumba JSON
-        chumb_data = await _get_json(s, CHUMBAYOUMBA_JSON)
-        if isinstance(chumb_data, list):
-            added = 0
-            for p in _parse_chumbayoumba_json(chumb_data):
-                add(p)
-                added += 1
-            logger.info("Chumbayoumba JSON: %s → %s", len(chumb_data), added)
-
-        # 5. SOCKS5
+        # 3. SOCKS5
         for url in SOCKS5_URLS:
             lines = await _get_text(s, url)
             added = 0
