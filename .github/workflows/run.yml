@@ -2,6 +2,7 @@ name: Proxy Bot
 
 on:
   schedule:
+    # Запуск в 07, 22, 37, 52 минуты каждого часа (интервал 15 мин)
     - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
@@ -42,14 +43,6 @@ jobs:
           restore-keys: |
             proxy-state-
 
-      - name: State status
-        run: |
-          if [ -f proxy_state.db ]; then
-            echo "✅ Состояние найдено: $(du -h proxy_state.db | cut -f1)"
-          else
-            echo "ℹ️ Первый запуск — БД будет создана"
-          fi
-
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -68,7 +61,7 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "chore: update proxy_state.db [skip ci]"
             git push
-            echo "✅ Состояние сохранено в репозиторий"
+            echo "✅ Состояние сохранено"
           else
-            echo "ℹ️ Изменений в state нет"
+            echo "ℹ️ Изменений нет"
           fi
