@@ -1,6 +1,7 @@
 """
-Проверка прокси с анализом probe_resistant.
-Оптимизировано: быстрая probe-проверка, кэш с лимитом.
+Проверка прокси с учётом РУ-сегмента.
+Увеличенные таймауты для медленных GitHub-раннеров.
+Кэш геолокации, retry при 429, корректный резолв доменов.
 """
 
 import asyncio
@@ -27,8 +28,8 @@ for name in (
 logger = logging.getLogger(__name__)
 
 # ─── Лимиты ────────────────────────────────────────────────────────────
-MAX_PING_MS = 8000
-MAX_PING_WEB_MS = 6000
+MAX_PING_MS = 5000               # 5 сек — отсеивает мусор
+MAX_PING_WEB_MS = 4000
 CHECK_TIMEOUT = 8
 WEB_CHECK_TIMEOUT = 10
 PROBE_TIMEOUT = 5
@@ -49,11 +50,11 @@ def compute_score(proxy: dict) -> int:
         if secret.startswith("ee"):
             base += 3000
         if probe:
-            base += 5000  # максимальный приоритет
+            base += 5000
     elif proto == "WEB":
         base = 5000
 
-    return base - min(ping, 8000)
+    return base - min(ping, 5000)
 
 
 ALLOWED_COUNTRIES = {
@@ -160,7 +161,6 @@ async def geolocate(ip: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 async def check_probe_resistant(domain: str) -> bool:
-    """Проверяет, что домен-маска отдаёт реальный ответ (любой < 500)."""
     if not domain:
         return False
     if domain in _probe_cache:
@@ -179,17 +179,12 @@ async def check_probe_resistant(domain: str) -> bool:
         logger.debug("probe %s failed: %s", domain, e)
         is_real = False
 
-    # Ограничиваем размер кэша
     if len(_probe_cache) >= PROBE_CACHE_LIMIT:
         _probe_cache.clear()
 
     _probe_cache[domain] = is_real
     return is_real
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  ENRICH
-# ═══════════════════════════════════════════════════════════════════════
 
 def _enrich(proxy: dict, ip: str, ping: int, geo: dict, probe_ok: bool) -> dict | None:
     country_code = geo.get("countryCode", "")
@@ -281,7 +276,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
     if avg_ping > limit:
         return None
 
-    # probe resistance — только для MTProto с доменом-маской
     probe_ok = False
     if not is_web and proxy.get("mask_domain"):
         probe_ok = await check_probe_resistant(proxy["mask_domain"])
