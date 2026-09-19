@@ -91,7 +91,7 @@
 | 🔐 **MTProto Fake TLS** | Handshake 3/2 + probe | 🥇 |
 | 🔐 **MTProto** | Handshake 3/2 | 🥈 |
 | 🌐 **WEB** | Handshake 3/2 | 🥉 |
-| 🧦 **SOCKS5** | Telegram + ya.ru | Обычный |
+| 🧦 **SOCKS5** | проверка на доступ к  Telegram API| Обычный |
 
 **9 прокси за запуск:** 3 MTProto + 3 SOCKS5 + 3 WEB. Чего не хватает — добирается MTProto.
 
