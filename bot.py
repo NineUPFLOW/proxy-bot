@@ -4,6 +4,7 @@ Telegram Proxy Bot 2026.
 - Последовательная проверка: MTProto → WEB → SOCKS5
 - Выборка: 3 MTProto + 3 SOCKS5 + 3 WEB (добираем MTProto)
 - Умная сортировка: probe_resistant → MTProto → WEB → SOCKS5
+- В seen пишутся ВСЕ проверенные прокси (включая мёртвые)
 """
 
 import asyncio
@@ -64,7 +65,7 @@ CONCURRENCY = 20
 
 # ─── Лимиты на проверку по протоколам ───
 MAX_MT_CHECK = 200
-MAX_WEB_CHECK = 100
+MAX_WEB_CHECK = 50
 MAX_SOCKS5_CHECK = 100
 
 
@@ -88,8 +89,12 @@ async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
     async with sem:
         try:
             result = await process_proxy(raw)
-            if result is not None:
-                state.mark_seen(result)
+            # Записываем в seen ВСЕ проверенные прокси (и рабочих, и мёртвых),
+            # чтобы не тратить время на их повторную проверку в следующих запусках.
+            try:
+                state.mark_seen(raw)
+            except Exception as e:
+                logger.debug("mark_seen failed: %s", e)
             return result
         except Exception as e:
             logger.debug("check error: %s", e)
@@ -256,10 +261,8 @@ async def run(bot: Bot):
     web_ok = [p for p in all_working if p["protocol"] == "WEB"]
     socks_ok = [p for p in all_working if p["protocol"] == "SOCKS5"]
 
-    # MTProto-пул: сначала probe, потом обычные
     mt_pool = probe_mt + normal_mt
 
-    # Берём по цели из каждой категории
     picked_mt = mt_pool[:TARGET_MT]
     picked_socks = socks_ok[:TARGET_SOCKS5]
     picked_web = web_ok[:TARGET_WEB]
@@ -278,7 +281,7 @@ async def run(bot: Bot):
             if len(final) >= PUBLISH_COUNT:
                 break
 
-    # Добиваем WEB, если всё ещё мало
+    # Добиваем WEB
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
         for p in web_ok:
@@ -290,7 +293,7 @@ async def run(bot: Bot):
             if len(final) >= PUBLISH_COUNT:
                 break
 
-    # И в самом крайнем случае — SOCKS5
+    # И в крайнем случае — SOCKS5
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
         for p in socks_ok:
