@@ -2,7 +2,6 @@ name: Proxy Bot
 
 on:
   schedule:
-    # Запуск в 07, 22, 37, 52 минуты каждого часа (интервал 15 мин)
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
