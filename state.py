@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "proxy_state.db"
 
-SEEN_TTL = 1 * 3600         # 1 час 
-PUBLISHED_TTL = 24 * 3600
-SOURCE_STATS_TTL = 7 * 24 * 3600
+# ─── TTL ───────────────────────────────────────────────────────────────
+SEEN_TTL = 2 * 3600              # 2 часа — не перепроверять прокси
+PUBLISHED_TTL = 24 * 3600        # 24 часа — не публиковать повторно
+SOURCE_STATS_TTL = 7 * 24 * 3600 # 7 дней
 
 
 def _proxy_hash(proxy: dict) -> str:
