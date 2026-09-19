@@ -48,15 +48,14 @@ logger = logging.getLogger("bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
 
-# TOPIC_ID — ID темы. Для темы "Proxy TG" в группе Internet Кормилица = 250
 _topic_raw = os.environ.get("TOPIC_ID", "").strip()
 TOPIC_ID = int(_topic_raw) if _topic_raw else None
 
 # ─── Публикация ───
-PUBLISH_COUNT = 9         # всего за один запуск
-TARGET_MT = 3             # цель: 3 MTProto
-TARGET_SOCKS5 = 3         # цель: 3 SOCKS5
-TARGET_WEB = 3            # цель: 3 WEB
+PUBLISH_COUNT = 9
+TARGET_MT = 3
+TARGET_SOCKS5 = 3
+TARGET_WEB = 3
 
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
@@ -64,17 +63,13 @@ MAX_SEND_RETRIES = 3
 # ─── Проверка ───
 CONCURRENCY = 20
 
-# ─── Лимиты на проверку по протоколам ───
-MAX_MT_CHECK = 300        # было 200 — теперь 300 (щедящий прирост)
+# ─── Лимиты на проверку ───
+MAX_MT_CHECK = 400
 MAX_WEB_CHECK = 50
 MAX_SOCKS5_CHECK = 100
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Дедупликация
-# ═══════════════════════════════════════════════════════════════════════
 def dedup_by_ip_port(proxies: list) -> list:
-    """Оставляет по одному прокси на IP:port (лучший по score)."""
     best = {}
     for p in proxies:
         key = (p["ip"], p["port"])
@@ -83,15 +78,10 @@ def dedup_by_ip_port(proxies: list) -> list:
     return list(best.values())
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Проверка одного прокси
-# ═══════════════════════════════════════════════════════════════════════
 async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
     async with sem:
         try:
             result = await process_proxy(raw)
-            # Записываем в seen ВСЕ проверенные прокси (и рабочих, и мёртвых),
-            # чтобы не тратить время на их повторную проверку в следующих запусках.
             try:
                 state.mark_seen(raw)
             except Exception as e:
@@ -102,9 +92,6 @@ async def check_with_semaphore(sem: asyncio.Semaphore, raw: dict):
             return None
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Отправка с retry и поддержкой тем
-# ═══════════════════════════════════════════════════════════════════════
 async def send_with_retry(bot: Bot, p: dict) -> bool:
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
@@ -138,11 +125,7 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
     return False
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Проверка группы прокси
-# ═══════════════════════════════════════════════════════════════════════
 async def check_group(group: list, name: str) -> list:
-    """Проверяет группу прокси параллельно, возвращает рабочие."""
     if not group:
         return []
 
@@ -163,9 +146,6 @@ async def check_group(group: list, name: str) -> list:
     return working
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Основной цикл
-# ═══════════════════════════════════════════════════════════════════════
 async def run(bot: Bot):
     logger.info("🚀 Запуск прокси-бота...")
     logger.info("📢 Публикация: chat_id=%s, topic_id=%s", CHAT_ID, TOPIC_ID)
@@ -173,7 +153,6 @@ async def run(bot: Bot):
     state.init_db()
     state.cleanup()
 
-    # ─── 1. Сбор ───
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
@@ -181,7 +160,6 @@ async def run(bot: Bot):
 
     raw_list = dedup_by_ip_port(raw_list)
 
-    # ─── 2. Разделение по протоколам ───
     mtproto = [r for r in raw_list if r.get("protocol") == "MTPROTO"]
     web = [r for r in raw_list if r.get("protocol") == "WEB"]
     socks5 = [r for r in raw_list if r.get("protocol") == "SOCKS5"]
@@ -191,9 +169,6 @@ async def run(bot: Bot):
         len(mtproto), len(web), len(socks5), len(raw_list),
     )
 
-    # ─── 3. Последовательная проверка: MTProto → WEB → SOCKS5 ───
-    # ВАЖНО: сначала фильтруем ВЕСЬ пул через seen, потом берём лимит.
-    # Это даёт +300 новых прокси в seen за запуск вместо +2.
     all_working = []
 
     random.shuffle(mtproto)
@@ -220,7 +195,6 @@ async def run(bot: Bot):
         logger.info("Ни один прокси не прошёл проверку")
         return
 
-    # ─── 4. Фильтрация опубликованных ───
     all_working = state.filter_unpublished(all_working)
     all_working = dedup_by_ip_port(all_working)
 
@@ -229,7 +203,6 @@ async def run(bot: Bot):
         logger.info("Все рабочие прокси уже публиковались")
         return
 
-    # ─── 5. Умная сортировка ───
     def sort_key(p):
         proto = p["protocol"]
         probe = p.get("probe_resistant", False)
@@ -257,7 +230,6 @@ async def run(bot: Bot):
             p.get("ping", "?"), p.get("score", "?"), probe_mark,
         )
 
-    # ─── 6. Формирование выборки: 3 MT + 3 SOCKS5 + 3 WEB ───
     probe_mt = [p for p in all_working
                 if p["protocol"] == "MTPROTO" and p.get("probe_resistant")]
     normal_mt = [p for p in all_working
@@ -273,7 +245,6 @@ async def run(bot: Bot):
 
     final = picked_mt + picked_socks + picked_web
 
-    # Добираем MTProto, если чего-то не хватило
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
         for p in mt_pool:
@@ -285,7 +256,6 @@ async def run(bot: Bot):
             if len(final) >= PUBLISH_COUNT:
                 break
 
-    # Добиваем WEB
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
         for p in web_ok:
@@ -297,7 +267,6 @@ async def run(bot: Bot):
             if len(final) >= PUBLISH_COUNT:
                 break
 
-    # И в крайнем случае — SOCKS5
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
         for p in socks_ok:
@@ -323,7 +292,6 @@ async def run(bot: Bot):
         logger.info("Нет прокси для публикации")
         return
 
-    # ─── 7. Публикация ───
     logger.info("Публикуем %s прокси", len(final))
     published_ips = set()
     published_ok = 0
