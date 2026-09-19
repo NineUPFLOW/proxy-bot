@@ -1,157 +1,109 @@
 # 🔐 Proxy Bot
 
-Telegram-бот, который **каждые 10 минут** собирает прокси из Telegram-каналов, проверяет их реальную работоспособность и публикует лучшие в указанный чат или тему.
+Telegram-бот, который каждые 10 минут собирает прокси (MTProto / WEB / SOCKS5) из Telegram-каналов, проверяет их и публикует лучшие в чат или тему.
 
-Работает на **GitHub Actions** — без собственного сервера.
-
----
+Работает на **GitHub Actions** — без сервера.
 
 ## ✨ Возможности
 
-- 📡 **Сбор** MTProto / WEB / SOCKS5 из 17 Telegram-источников
-- 🧵 **Поддержка тем (Topics)** — публикация в конкретную ветку группы
-- 🧠 **Анализ Secret** — приоритет Fake TLS (маскировка под HTTPS)
-- 🌍 **Probe Resistance Test** — проверка устойчивости к DPI
-- 🔬 **Реальная проверка** через handshake Telethon + `ya.ru`
-- 📊 **Выборка 9 прокси**: 3 MTProto + 3 SOCKS5 + 3 WEB (с добиранием)
-- 💾 **SQLite-состояние** — дедупликация, без повторов 24 часа
-- 🚀 **Автозапуск** каждые 10 минут через GitHub Actions
+- 📡 Сбор из 17 Telegram-источников, включая темы (Topics)
+- 🧠 Анализ Secret — приоритет Fake TLS и probe-resistant
+- 🔬 Реальная проверка через handshake Telethon + ya.ru
+- 🚫 Фильтр мусора — MAX_PING_MS = 5000
+- 📊 Выборка 9 прокси: 3 MTProto + 3 SOCKS5 + 3 WEB
+- 💾 SQLite-состояние (seen 2ч, published 24ч)
+- 🚀 Автозапуск каждые 10 минут
 
----
+## 🔐 Секреты (Settings → Secrets and variables → Actions)
 
-## 🔐 Переменные окружения (GitHub Secrets)
-
-Добавить в **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Имя | Обязательно | Описание |
+| Имя | Обяз. | Описание |
 |---|:---:|---|
-| `BOT_TOKEN` | ✅ | Токен бота от [@BotFather](https://t.me/BotFather) |
-| `CHAT_ID` | ✅ | ID канала/группы (отрицательное число, вида `-1001234567890`) |
-| `TOPIC_ID` | ⚠️ | ID темы внутри группы. **Если тем нет — не добавляйте** |
-| `API_ID` | ✅ | API ID с [my.telegram.org](https://my.telegram.org) |
-| `API_HASH` | ✅ | API Hash с [my.telegram.org](https://my.telegram.org) |
-| `TG_SESSION` | ✅ | Строка сессии Telethon (обязательна) |
+| BOT_TOKEN | ✅ | Токен от @BotFather |
+| CHAT_ID | ✅ | ID чата (например, -1001234567890) |
+| TOPIC_ID | ⚠️ | ID темы (если есть). Иначе не добавлять |
+| API_ID | ✅ | С my.telegram.org |
+| API_HASH | ✅ | С my.telegram.org |
+| TG_SESSION | ✅ | Строка сессии Telethon |
 
-### 🔑 Как получить `TG_SESSION`
+### 🔑 TG_SESSION — онлайн-генератор
 
-Онлайн-генератор: **[SSG — String Session Generator](https://gabrielmaialva33.github.io/ssg/)**
+SSG — String Session Generator: https://gabrielmaialva33.github.io/ssg/
 
-1. Введите `API_ID`, `API_HASH` и номер телефона.
+1. Введите API_ID, API_HASH, номер телефона.
 2. Введите код из Telegram.
-3. Готовая строка придёт в **«Избранное»** (Saved Messages).
-4. Скопируйте её в секрет `TG_SESSION`.
+3. Строка придёт в «Избранное» — скопируйте в TG_SESSION.
 
-> ⚠️ Сессия даёт полный доступ к аккаунту. Используйте отдельный аккаунт.
+⚠️ Сессия = полный доступ к аккаунту. Используйте отдельный аккаунт.
 
-### 💬 Как получить `CHAT_ID`
+### 💬 CHAT_ID
 
-1. Добавьте бота в группу/канал **как администратора**.
-2. Перешлите любое сообщение из группы боту [@userinfobot](https://t.me/userinfobot).
-3. Скопируйте число вида `-100xxxxxxxxxx`.
+Перешлите любое сообщение из группы боту @userinfobot.
 
-### 🧵 Как получить `TOPIC_ID`
+### 🧵 TOPIC_ID
 
-Нужен только если в группе включены темы:
-
-1. Отправьте сообщение в **нужную тему**.
-2. Нажмите на него правой кнопкой → **Copy Message Link**.
-3. Ссылка вида `https://t.me/c/1234567890/15/42`. Число **`15`** — это `TOPIC_ID`.
-4. Добавьте его в секрет `TOPIC_ID`.
-
-**Если тем нет** — просто не создавайте секрет `TOPIC_ID`. Бот опубликует в General.
-
----
+Отправьте сообщение в нужную тему → правый клик → Copy Message Link. Ссылка вида https://t.me/c/1234567890/15/42 — число 15 это TOPIC_ID. Если тем нет — не создавайте секрет.
 
 ## 🚀 Запуск
 
-1. Форкните репозиторий.
-2. Добавьте секреты (см. выше).
-3. Откройте **Actions → Proxy Bot → Run workflow**.
-4. Через 2–4 минуты в чате появятся прокси.
+1. Форк репозитория.
+2. Добавьте 6 секретов.
+3. Actions → Proxy Bot → Run workflow.
 
-Дальше бот запускается **сам каждые 10 минут**.
-
----
+Дальше — сам каждые 10 минут.
 
 ## 📊 Что публикуется
 
 | Протокол | Проверка | Приоритет |
 |---|---|---|
-| **MTProto Fake TLS** | Handshake ×3 + probe test | 🥇 Высший |
-| **MTProto** | Handshake ×3 | 🥈 |
-| **WEB** | Handshake ×3 | 🥉 |
-| **SOCKS5** | Telegram + ya.ru | Обычный |
+| MTProto Fake TLS | Handshake 3/2 + probe | 🥇 |
+| MTProto | Handshake 3/2 | 🥈 |
+| WEB | Handshake 3/2 | 🥉 |
+| SOCKS5 | Telegram + ya.ru | Обычный |
 
-**За один запуск:** до 9 прокси — **3 MTProto + 3 SOCKS5 + 3 WEB**. Если чего-то не хватает, добирается MTProto.
-
----
+9 прокси за запуск: 3 MTProto + 3 SOCKS5 + 3 WEB. Чего не хватает — добирается MTProto.
 
 ## ⚙️ Настройка
 
-Параметры в `bot.py`:
+bot.py:
 
-| Параметр | По умолчанию | Описание |
-|---|:---:|---|
-| `PUBLISH_COUNT` | `9` | Всего за один запуск |
-| `TARGET_MT` | `3` | Цель по MTProto |
-| `TARGET_SOCKS5` | `3` | Цель по SOCKS5 |
-| `TARGET_WEB` | `3` | Цель по WEB |
-| `CONCURRENCY` | `20` | Параллельных проверок |
-| `SEND_DELAY` | `3` | Пауза между публикациями (сек) |
+| Параметр | По умолчанию |
+|---|:---:|
+| PUBLISH_COUNT | 9 |
+| TARGET_MT / TARGET_SOCKS5 / TARGET_WEB | 3 / 3 / 3 |
+| CONCURRENCY | 20 |
+| MAX_MT_CHECK | 400 |
+| MAX_SOCKS5_CHECK | 100 |
 
-Расписание в `.github/workflows/run.yml`:
+checker.py:
 
-```yaml
-- cron: '*/10 * * * *'
-```
+| Параметр | По умолчанию |
+|---|:---:|
+| MAX_PING_MS | 5000 |
+| MT_ATTEMPTS / MT_REQUIRED | 3 / 2 |
 
----
+Расписание в .github/workflows/run.yml:
+
+    - cron: '*/10 * * * *'
 
 ## 💾 Состояние
 
-Бот ведёт SQLite-базу `proxy_state.db`:
+SQLite proxy_state.db (в actions/cache, не в git):
 
-- **`seen_proxies`** — что уже проверялось (TTL **1 час**)
-- **`published_proxies`** — что уже публиковалось (TTL **24 часа**)
-
-База хранится **в `actions/cache`** и не коммитится в репозиторий. Это позволяет:
-
-- Не раздувать git-историю.
-- Восстанавливать состояние между запусками.
-- Автоматически чистить старые записи.
-
----
+| Таблица | TTL |
+|---|---|
+| seen_proxies | 2 часа |
+| published_proxies | 24 часа |
 
 ## 🛠 Возможные проблемы
 
 | Проблема | Решение |
 |---|---|
-| `BOT_TOKEN invalid` | Проверьте формат `123456:ABC...` |
-| `CHAT_ADMIN_REQUIRED` | Сделайте бота админом группы |
-| `Message thread not found` | Уберите секрет `TOPIC_ID` или проверьте ID |
-| `AuthKeyUnregisteredError` | `TG_SESSION` недействительна — сгенерируйте заново |
-| Cron не срабатывает | Сделайте пустой коммит в `README.md`, включите workflow в Actions |
-| Запуски с задержкой | Норма для GitHub Actions. Задержки до 30 минут |
-| SOCKS5 не публикуются | Норма — большинство блокируются ТСПУ |
-
----
-
-## 📁 Структура
-
-```
-proxy-bot/
-├── .github/workflows/run.yml   # Cron + запуск
-├── bot.py                      # Основной цикл
-├── sources.py                  # Парсер Telegram-источников
-├── checker.py                  # Проверка + probe test
-├── formatter.py                # Оформление сообщений
-├── state.py                    # SQLite-состояние
-├── requirements.txt            # Зависимости
-├── .gitignore
-└── README.md
-```
-
----
+| BOT_TOKEN invalid | Проверьте формат 123456:ABC... |
+| CHAT_ADMIN_REQUIRED | Сделайте бота админом |
+| Message thread not found | Уберите TOPIC_ID или проверьте ID |
+| AuthKeyUnregisteredError | Перегенерируйте TG_SESSION |
+| Cron не срабатывает | Пустой коммит в README.md + Enable workflow |
+| SOCKS5 / WEB не публикуются | Норма — их мало живых |
 
 ## 📝 Лицензия
 
