@@ -52,10 +52,10 @@ _topic_raw = os.environ.get("TOPIC_ID", "").strip()
 TOPIC_ID = int(_topic_raw) if _topic_raw else None
 
 # ─── Публикация ───
-PUBLISH_COUNT = 15
-TARGET_MT = 8
-TARGET_SOCKS5 = 5
-TARGET_WEB = 2
+PUBLISH_COUNT = 6
+TARGET_MT = 3
+TARGET_SOCKS5 = 3
+TARGET_WEB = 3
 
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
