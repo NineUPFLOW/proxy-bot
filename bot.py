@@ -64,8 +64,8 @@ CONCURRENCY = 20
 
 # ─── Лимиты на проверку по протоколам ───
 MAX_MT_CHECK = 200
-MAX_WEB_CHECK = 50
-MAX_SOCKS5_CHECK = 20
+MAX_WEB_CHECK = 100
+MAX_SOCKS5_CHECK = 100
 
 
 # ═══════════════════════════════════════════════════════════════════════
