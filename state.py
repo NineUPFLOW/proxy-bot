@@ -14,14 +14,26 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "proxy_state.db"
 
-# ─── TTL ───────────────────────────────────────────────────────────────
-SEEN_TTL = 6 * 3600                 
+SEEN_TTL = 2 * 3600              # 2 часа — не перепроверять прокси
 PUBLISHED_TTL = 24 * 3600        # 24 часа — не публиковать повторно
 SOURCE_STATS_TTL = 7 * 24 * 3600 # 7 дней
 
 
+def _normalize_proxy(proxy: dict) -> dict:
+    """Возвращает канонический набор полей для расчёта хэша."""
+    if not isinstance(proxy, dict):
+        raise TypeError(f"proxy must be dict, got {type(proxy).__name__}")
+    ip = str(proxy.get("ip", "")).strip()
+    port = proxy.get("port")
+    protocol = str(proxy.get("protocol", "")).strip()
+    if not ip or not protocol or port is None:
+        raise ValueError(f"Invalid proxy payload: {proxy!r}")
+    return {"ip": ip, "port": int(port), "protocol": protocol}
+
+
 def _proxy_hash(proxy: dict) -> str:
-    raw = f"{proxy['ip']}:{proxy['port']}:{proxy['protocol']}"
+    p = _normalize_proxy(proxy)
+    raw = f"{p['ip']}:{p['port']}:{p['protocol']}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -98,7 +110,8 @@ def is_seen(proxy: dict) -> bool:
 
 
 def mark_seen(proxy: dict):
-    h = _proxy_hash(proxy)
+    p = _normalize_proxy(proxy)
+    h = _proxy_hash(p)
     now = time.time()
     with _connect() as conn:
         conn.execute("""
@@ -108,7 +121,7 @@ def mark_seen(proxy: dict):
             ON CONFLICT(hash) DO UPDATE SET
                 last_seen = excluded.last_seen,
                 check_count = check_count + 1
-        """, (h, proxy["ip"], proxy["port"], proxy["protocol"], now, now))
+        """, (h, p["ip"], p["port"], p["protocol"], now, now))
 
 
 def is_published(proxy: dict) -> bool:
@@ -123,8 +136,12 @@ def is_published(proxy: dict) -> bool:
 
 
 def mark_published(proxy: dict):
-    h = _proxy_hash(proxy)
+    p = _normalize_proxy(proxy)
+    h = _proxy_hash(p)
     now = time.time()
+    ping = proxy.get("ping_ms")
+    if ping is None:
+        ping = proxy.get("ping")
     with _connect() as conn:
         conn.execute("""
             INSERT INTO published_proxies
@@ -133,16 +150,77 @@ def mark_published(proxy: dict):
             ON CONFLICT(hash) DO UPDATE SET
                 published_at = excluded.published_at,
                 ping_ms = excluded.ping_ms
-        """, (h, proxy["ip"], proxy["port"], proxy["protocol"], now,
-              proxy.get("ping")))
+        """, (h, p["ip"], p["port"], p["protocol"], now, ping))
 
 
 def filter_unseen(proxies: list) -> list:
-    return [p for p in proxies if not is_seen(p)]
+    """Возвращает оригинальные прокси со всеми дополнительными полями."""
+    if not proxies:
+        return []
+
+    pairs = []
+    for item in proxies:
+        try:
+            h = _proxy_hash(item)
+        except (TypeError, ValueError):
+            continue
+        pairs.append((item, h))
+
+    if not pairs:
+        return []
+
+    hashes = [h for _, h in pairs]
+    cutoff = time.time() - SEEN_TTL
+    placeholders = ",".join("?" for _ in hashes)
+    with _connect() as conn:
+        seen_hashes = {
+            row[0]
+            for row in conn.execute(
+                f"""
+                SELECT hash
+                FROM seen_proxies
+                WHERE hash IN ({placeholders}) AND last_seen > ?
+                """,
+                (*hashes, cutoff),
+            ).fetchall()
+        }
+
+    return [item for item, h in pairs if h not in seen_hashes]
 
 
 def filter_unpublished(proxies: list) -> list:
-    return [p for p in proxies if not is_published(p)]
+    """Возвращает оригинальные прокси со всеми дополнительными полями."""
+    if not proxies:
+        return []
+
+    pairs = []
+    for item in proxies:
+        try:
+            h = _proxy_hash(item)
+        except (TypeError, ValueError):
+            continue
+        pairs.append((item, h))
+
+    if not pairs:
+        return []
+
+    hashes = [h for _, h in pairs]
+    cutoff = time.time() - PUBLISHED_TTL
+    placeholders = ",".join("?" for _ in hashes)
+    with _connect() as conn:
+        published_hashes = {
+            row[0]
+            for row in conn.execute(
+                f"""
+                SELECT hash
+                FROM published_proxies
+                WHERE hash IN ({placeholders}) AND published_at > ?
+                """,
+                (*hashes, cutoff),
+            ).fetchall()
+        }
+
+    return [item for item, h in pairs if h not in published_hashes]
 
 
 def cleanup():
@@ -154,5 +232,8 @@ def cleanup():
     with _connect() as conn:
         conn.execute("DELETE FROM seen_proxies WHERE last_seen < ?", (seen_cutoff,))
         conn.execute("DELETE FROM published_proxies WHERE published_at < ?", (published_cutoff,))
-        conn.execute("DELETE FROM source_stats WHERE last_success < ?", (stats_cutoff,))
+        conn.execute(
+            "DELETE FROM source_stats WHERE last_success IS NOT NULL AND last_success < ?",
+            (stats_cutoff,),
+        )
     logger.info("Очистка состояния выполнена")
