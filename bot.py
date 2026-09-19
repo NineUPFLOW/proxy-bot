@@ -56,8 +56,8 @@ SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
 MAX_MT_CHECK = 200
-MAX_WEB_CHECK = 50
-MAX_SOCKS5_CHECK = 20
+MAX_WEB_CHECK = 100
+MAX_SOCKS5_CHECK = 100
 
 
 # ═══════════════════════════════════════════════════════════════════════
