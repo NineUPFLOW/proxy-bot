@@ -1,5 +1,8 @@
 """
-Проверка прокси с учётом РУ-сегмента.
+Проверка прокси.
+- MTProto/WEB: handshake через Telethon (MT_ATTEMPTS попыток, нужно MT_REQUIRED)
+- SOCKS5: только api.telegram.org (без ya.ru — для Telegram он избыточен)
+- Probe Resistance Test для MTProto с маской домена
 """
 
 import asyncio
@@ -33,7 +36,7 @@ WEB_CHECK_TIMEOUT = 10
 PROBE_TIMEOUT = 5
 
 MT_ATTEMPTS = 3
-MT_REQUIRED = 1                  # было 2 — теперь 1 (мягче)
+MT_REQUIRED = 1                  # достаточно 1 успешного handshake
 
 # ─── Скоринг ───────────────────────────────────────────────────────────
 def compute_score(proxy: dict) -> int:
@@ -67,8 +70,8 @@ API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
+# ─── Тестовые URL ──────────────────────────────────────────────────────
 TEST_URL_TG = "https://api.telegram.org"
-TEST_URL_RU = "https://ya.ru"
 
 _http_session: aiohttp.ClientSession | None = None
 _geo_cache: dict[str, dict] = {}
@@ -283,7 +286,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  SOCKS5
+#  SOCKS5 (только Telegram)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def check_socks5(proxy: dict) -> dict | None:
@@ -305,20 +308,10 @@ async def check_socks5(proxy: dict) -> dict | None:
         async with aiohttp.ClientSession(
             connector=connector, connector_owner=False
         ) as session:
+            # Проверка только через api.telegram.org — этого достаточно для Telegram
             try:
                 async with session.get(
                     TEST_URL_TG,
-                    timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
-                    allow_redirects=False,
-                ) as r:
-                    if r.status >= 500:
-                        return None
-            except Exception:
-                return None
-
-            try:
-                async with session.get(
-                    TEST_URL_RU,
                     timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
                     allow_redirects=False,
                 ) as r:
