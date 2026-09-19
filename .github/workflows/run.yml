@@ -2,11 +2,12 @@ name: Proxy Bot
 
 on:
   schedule:
+    # Каждые 10 минут
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: proxy-bot
@@ -15,13 +16,11 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -34,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Restore state cache
+      - name: Restore state from cache
         uses: actions/cache@v4
         with:
           path: proxy_state.db
@@ -52,16 +51,23 @@ jobs:
           TG_SESSION: ${{ secrets.TG_SESSION }}
         run: python -u bot.py
 
-      - name: Commit state to repository
+      - name: Show state stats
         if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f proxy_state.db
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: update proxy_state.db [skip ci]"
-            git push
-            echo "✅ Состояние сохранено"
+          if [ -f proxy_state.db ]; then
+            echo "─── State statistics ───"
+            python - <<'PY'
+          import sqlite3
+          try:
+              conn = sqlite3.connect("proxy_state.db")
+              seen = conn.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
+              pub = conn.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+              print(f" seen_proxies      : {seen}")
+              print(f" published_proxies : {pub}")
+              conn.close()
+          except Exception as e:
+              print(f" ⚠️ Failed to read DB: {e}")
+          PY
           else
-            echo "ℹ️ Изменений нет"
+            echo "⚠️ proxy_state.db is missing"
           fi
