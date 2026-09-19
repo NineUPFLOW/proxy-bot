@@ -182,7 +182,11 @@ async def run(bot: Bot):
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
-        await send_status(bot, "⚠️ <b>Источники пусты</b>\n\nНе удалось собрать ни одного прокси из Telegram-каналов.")
+        await send_status(
+            bot,
+            "⚠️ Источники пусты\n\n"
+            "Не удалось собрать ни одного прокси из Telegram-каналов."
+        )
         return
 
     raw_list = dedup_by_ip_port(raw_list)
@@ -205,6 +209,7 @@ async def run(bot: Bot):
     mt_proxies = await check_group(fresh_mt[:MAX_MT_CHECK], "MTProto")
     all_working.extend(mt_proxies)
 
+    fresh_web = []
     if web:
         random.shuffle(web)
         fresh_web = state.filter_unseen(web)
@@ -212,6 +217,7 @@ async def run(bot: Bot):
         web_proxies = await check_group(fresh_web[:MAX_WEB_CHECK], "WEB")
         all_working.extend(web_proxies)
 
+    fresh_socks = []
     if socks5:
         random.shuffle(socks5)
         fresh_socks = state.filter_unseen(socks5)
@@ -223,10 +229,10 @@ async def run(bot: Bot):
         logger.info("Ни один прокси не прошёл проверку")
         await send_status(
             bot,
-            "⚠️ <b>Ни один прокси не прошёл проверку</b>\n\n"
+            "⚠️ Ни один прокси не прошёл проверку\n\n"
             f"Проверено: MTProto={len(fresh_mt[:MAX_MT_CHECK])}, "
-            f"WEB={len(fresh_web[:MAX_WEB_CHECK]) if web else 0}, "
-            f"SOCKS5={len(fresh_socks[:MAX_SOCKS5_CHECK]) if socks5 else 0}\n\n"
+            f"WEB={len(fresh_web[:MAX_WEB_CHECK])}, "
+            f"SOCKS5={len(fresh_socks[:MAX_SOCKS5_CHECK])}\n\n"
             "Попробую в следующем запуске."
         )
         return
@@ -243,9 +249,9 @@ async def run(bot: Bot):
         logger.info("Все рабочие прокси уже публиковались")
         await send_status(
             bot,
-            "💤 <b>Все рабочие прокси уже публиковались</b>\n\n"
-            f"Проверено рабочих: <b>{before_filter}</b>\n"
-            "Все они были опубликованы за последние 24 часа.\n\n"
+            "💤 Все рабочие прокси уже публиковались\n\n"
+            f"Проверено рабочих: {before_filter}\n"
+            "Все они были опубликованы недавно.\n\n"
             "Жду появления новых прокси в источниках."
         )
         return
@@ -339,7 +345,11 @@ async def run(bot: Bot):
 
     if not final:
         logger.info("Нет прокси для публикации")
-        await send_status(bot, "⚠️ <b>Нет прокси для публикации</b>\n\nПосле фильтрации не осталось подходящих.")
+        await send_status(
+            bot,
+            "⚠️ Нет прокси для публикации\n\n"
+            "После фильтрации не осталось подходящих."
+        )
         return
 
     # ─── 6. Публикация ───
