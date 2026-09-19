@@ -2,10 +2,9 @@
 Telegram Proxy Bot 2026.
 - Публикация в конкретную тему (Topic) Telegram-группы
 - Последовательная проверка: MTProto → WEB → SOCKS5
-- Выборка: 3 MTProto + 3 SOCKS5 + 3 WEB (добираем MTProto)
+- Выборка: 8 MTProto + 5 SOCKS5 + 2 WEB (добираем MTProto)
 - Умная сортировка: probe_resistant → MTProto → WEB → SOCKS5
 - В seen пишутся ВСЕ проверенные прокси (включая мёртвые)
-- Фильтрация через seen ДО среза по лимиту
 """
 
 import asyncio
@@ -43,7 +42,7 @@ for noisy in (
 logger = logging.getLogger("bot")
 
 # ═══════════════════════════════════════════════════════════════════════
-# Конфигурация (всё из GitHub Secrets)
+# Конфигурация
 # ═══════════════════════════════════════════════════════════════════════
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
@@ -52,10 +51,10 @@ _topic_raw = os.environ.get("TOPIC_ID", "").strip()
 TOPIC_ID = int(_topic_raw) if _topic_raw else None
 
 # ─── Публикация ───
-PUBLISH_COUNT = 9
-TARGET_MT = 3
-TARGET_SOCKS5 = 3
-TARGET_WEB = 3
+PUBLISH_COUNT = 15        # было 9 — теперь 15
+TARGET_MT = 8             # было 3 — теперь 8
+TARGET_SOCKS5 = 5         # было 3 — теперь 5
+TARGET_WEB = 2            # было 3 — теперь 2
 
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
@@ -64,9 +63,9 @@ MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
 
 # ─── Лимиты на проверку ───
-MAX_MT_CHECK = 400
+MAX_MT_CHECK = 500        # было 400 — теперь 500
 MAX_WEB_CHECK = 50
-MAX_SOCKS5_CHECK = 100
+MAX_SOCKS5_CHECK = 150    # было 100 — теперь 150
 
 
 def dedup_by_ip_port(proxies: list) -> list:
@@ -149,6 +148,8 @@ async def check_group(group: list, name: str) -> list:
 async def run(bot: Bot):
     logger.info("🚀 Запуск прокси-бота...")
     logger.info("📢 Публикация: chat_id=%s, topic_id=%s", CHAT_ID, TOPIC_ID)
+    logger.info("📊 Цели: %s прокси (%s MT + %s SOCKS5 + %s WEB)",
+                PUBLISH_COUNT, TARGET_MT, TARGET_SOCKS5, TARGET_WEB)
 
     state.init_db()
     state.cleanup()
@@ -245,6 +246,7 @@ async def run(bot: Bot):
 
     final = picked_mt + picked_socks + picked_web
 
+    # Добираем MTProto, если чего-то не хватило
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
         for p in mt_pool:
@@ -256,9 +258,10 @@ async def run(bot: Bot):
             if len(final) >= PUBLISH_COUNT:
                 break
 
+    # Добиваем SOCKS5
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
-        for p in web_ok:
+        for p in socks_ok:
             key = (p["ip"], p["port"])
             if key in used_keys:
                 continue
@@ -267,9 +270,10 @@ async def run(bot: Bot):
             if len(final) >= PUBLISH_COUNT:
                 break
 
+    # И WEB в самом крайнем случае
     if len(final) < PUBLISH_COUNT:
         used_keys = {(p["ip"], p["port"]) for p in final}
-        for p in socks_ok:
+        for p in web_ok:
             key = (p["ip"], p["port"])
             if key in used_keys:
                 continue
