@@ -2,7 +2,6 @@ name: Proxy Bot
 
 on:
   schedule:
-    # Каждые 10 минут
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
@@ -33,12 +32,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Validate required secrets
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: |
+          python - <<'PY'
+          import os
+          required = ["BOT_TOKEN", "CHAT_ID", "API_ID", "API_HASH", "TG_SESSION"]
+          missing = [name for name in required if not os.getenv(name)]
+          if missing:
+              raise SystemExit(f"❌ Missing secrets: {', '.join(missing)}")
+          print("✅ Secrets validation passed")
+          PY
+
       - name: Restore state from cache
         uses: actions/cache@v4
         with:
-          path: proxy_state.db
-          key: proxy-state-${{ github.run_id }}
+          path: |
+            proxy_state.db
+            proxy_state.db-wal
+            proxy_state.db-shm
+          key: proxy-state-${{ github.ref_name }}-${{ runner.os }}
           restore-keys: |
+            proxy-state-${{ github.ref_name }}-
             proxy-state-
 
       - name: Run bot
