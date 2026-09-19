@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent / "proxy_state.db"
 
 SEEN_TTL = 2 * 3600              # 2 часа — не перепроверять прокси
-PUBLISHED_TTL = 24 * 3600        # 24 часа — не публиковать повторно
+PUBLISHED_TTL = 6 * 3600         # 6 часов — можно переопубликовать живые прокси
 SOURCE_STATS_TTL = 7 * 24 * 3600 # 7 дней
 
 
