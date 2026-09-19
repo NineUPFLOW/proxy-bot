@@ -18,7 +18,7 @@ from telethon.tl.types import MessageEntityCode, MessageEntityPre
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ (username или ссылка) ──────────────────────────────────
+# ─── ИСТОЧНИКИ ─────────────────────────────────────────────────────────
 TELEGRAM_SOURCES = [
     "TProxyRU",
     "ProxyMTProto",
@@ -39,7 +39,7 @@ TELEGRAM_SOURCES = [
     "RaViraNet",
 ]
 
-MESSAGES_LIMIT = 200          # читаем больше сообщений
+MESSAGES_LIMIT = 200
 SOURCE_TIMEOUT = 30
 SOURCE_DELAY = 2
 
@@ -47,7 +47,7 @@ API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-# ─── Regex для извлечения URL из текста ───────────────────────────────
+# ─── Regex для извлечения URL ──────────────────────────────────────────
 RE_MARKDOWN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 RE_HTML_HREF = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 RE_TG_URL = re.compile(
@@ -56,12 +56,13 @@ RE_TG_URL = re.compile(
     r"|tg://webproxy[^\s<>\"'\)\]]+|t\.me/webproxy[^\s<>\"'\)\]]+"
     r"|socks5://[^\s<>\"'\)\]]+|socks://[^\s<>\"'\)\]]+)"
 )
-RE_TG_RAW = re.compile(r"tg://[^\s<>\"'\)\]]+")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  АНАЛИЗ SECRET
 # ═══════════════════════════════════════════════════════════════════════
 HEX_CHARS = set("0123456789abcdefABCDEF")
+
 
 def _extract_domain_from_secret(secret: str) -> str | None:
     """Извлекает домен-маску из ee-секрета."""
@@ -96,6 +97,7 @@ def analyze_secret(proxy: dict):
         if domain:
             proxy["mask_domain"] = domain
             proxy["probe_resistant"] = True
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  ПАРСЕРЫ
@@ -210,6 +212,7 @@ def _parse_bare_socks5(line: str):
 
 
 def _extract_from_token(token: str):
+    """Извлекает прокси из одного токена/строки."""
     token = token.strip().strip("`<>\"'()[]{}")
     if not token:
         return None
@@ -231,7 +234,7 @@ def _extract_proxies_from_text(text: str) -> list:
     result = []
     seen_urls = set()
 
-    # 1. Markdown-ссылки
+    # 1. Markdown-ссылки [text](url)
     for match in RE_MARKDOWN.finditer(text):
         url = match.group(2).strip()
         if url not in seen_urls:
@@ -258,7 +261,7 @@ def _extract_proxies_from_text(text: str) -> list:
             if p:
                 result.append(p)
 
-    # 4. Fallback: ip:port (без ссылок)
+    # 4. Fallback: ip:port (в строках без ссылок)
     if not result:
         for line in text.splitlines():
             line = line.strip()
@@ -277,30 +280,29 @@ def _extract_proxies_from_text(text: str) -> list:
 def _extract_proxies_from_message(msg) -> list:
     """
     Извлекает прокси из сообщения:
-    - текст
-    - подпись (caption)
+    - текст (включая подпись к медиа)
     - inline-кнопки
     - code/pre блоки
     """
     result = []
 
-    # Текст
-    if msg.message:
-        result.extend(_extract_proxies_from_text(msg.message))
-
-    # Подпись к медиа
-    if msg.caption:
-        result.extend(_extract_proxies_from_text(msg.caption))
+    # Текст сообщения (в Telethon .message включает и caption для медиа)
+    text = getattr(msg, "message", None) or getattr(msg, "text", None)
+    if text:
+        result.extend(_extract_proxies_from_text(text))
 
     # Code / Pre блоки
-    if msg.entities:
+    if text and getattr(msg, "entities", None):
         for ent in msg.entities:
             if isinstance(ent, (MessageEntityCode, MessageEntityPre)):
-                code_text = msg.message[ent.offset: ent.offset + ent.length]
-                result.extend(_extract_proxies_from_text(code_text))
+                try:
+                    code_text = text[ent.offset: ent.offset + ent.length]
+                    result.extend(_extract_proxies_from_text(code_text))
+                except Exception:
+                    pass
 
     # Inline-кнопки
-    if msg.reply_markup:
+    if getattr(msg, "reply_markup", None):
         try:
             rows = getattr(msg.reply_markup, "rows", [])
             for row in rows:
@@ -314,6 +316,7 @@ def _extract_proxies_from_message(msg) -> list:
             logger.debug("markup parse error: %s", e)
 
     return result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  ПАРСИНГ ИСТОЧНИКОВ С ПОДДЕРЖКОЙ ТЕМ
@@ -331,41 +334,47 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
         except Exception:
             pass
 
-        # Получаем entity группы
         entity = await client.get_entity(source)
 
-        # Собираем message_thread_id из недавних сообщений,
-        # чтобы потом прочитать каждую тему отдельно
+        # Собираем ID тем из недавних сообщений
         thread_ids = set()
         try:
             async for msg in client.iter_messages(entity, limit=100):
-                if msg.reply_to and getattr(msg.reply_to, "reply_to_top_id", None):
-                    thread_ids.add(msg.reply_to.reply_to_top_id)
+                if msg and msg.reply_to:
+                    top_id = getattr(msg.reply_to, "reply_to_top_id", None)
+                    if top_id:
+                        thread_ids.add(top_id)
         except Exception as e:
             logger.debug("Не удалось собрать thread_ids: %s", e)
 
-        # Читаем сообщения: общая лента + каждая тема
+        # Основная лента
         messages = await asyncio.wait_for(
             client.get_messages(entity, limit=MESSAGES_LIMIT),
             timeout=SOURCE_TIMEOUT,
         )
 
         for msg in messages:
-            result.extend(_extract_proxies_from_message(msg))
+            if msg is None:
+                continue
+            try:
+                result.extend(_extract_proxies_from_message(msg))
+            except Exception as e:
+                logger.debug("skip msg: %s", e)
 
-        # Отдельно проходим по каждой теме
+        # Каждая тема отдельно
         for thread_id in thread_ids:
             try:
                 thread_msgs = await asyncio.wait_for(
-                    client.get_messages(
-                        entity,
-                        limit=50,
-                        reply_to=thread_id,
-                    ),
+                    client.get_messages(entity, limit=50, reply_to=thread_id),
                     timeout=SOURCE_TIMEOUT,
                 )
                 for msg in thread_msgs:
-                    result.extend(_extract_proxies_from_message(msg))
+                    if msg is None:
+                        continue
+                    try:
+                        result.extend(_extract_proxies_from_message(msg))
+                    except Exception as e:
+                        logger.debug("skip thread msg: %s", e)
             except Exception as e:
                 logger.debug("Ошибка чтения темы %s: %s", thread_id, e)
             await asyncio.sleep(0.5)
@@ -430,6 +439,7 @@ async def fetch_from_telegram_sources() -> list:
 
     logger.info("Из Telegram-источников собрано: %s", len(result))
     return result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  ГЛАВНАЯ ФУНКЦИЯ
