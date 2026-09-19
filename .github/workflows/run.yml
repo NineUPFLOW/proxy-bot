@@ -50,13 +50,14 @@ jobs:
           PY
 
       - name: Restore state from cache
-        uses: actions/cache@v4
+        id: state-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             proxy_state.db
             proxy_state.db-wal
             proxy_state.db-shm
-          key: proxy-state-${{ github.ref_name }}-${{ runner.os }}
+          key: proxy-state-${{ github.ref_name }}-${{ github.run_number }}
           restore-keys: |
             proxy-state-${{ github.ref_name }}-
             proxy-state-
@@ -91,3 +92,13 @@ jobs:
           else
             echo "⚠️ proxy_state.db is missing"
           fi
+
+      - name: Save state to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            proxy_state.db
+            proxy_state.db-wal
+            proxy_state.db-shm
+          key: proxy-state-${{ github.ref_name }}-${{ github.run_number }}
