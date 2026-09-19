@@ -85,7 +85,6 @@ def format_message(p: dict) -> str:
         f"┌ ✅ <b>Название:</b> {flag_str}\n"
         f"├ 🔗 <b>Протокол:</b> {proto_label}\n"
         f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
-        f"├ ✅ <b>Белый IP:</b> Нет\n"
         f"├ 📍 <b>Страна:</b> {flag_str}\n"
         f"├ 📍 <b>Город:</b> {city}\n"
         f"├ 🏠 <b>Провайдер:</b> {provider}\n"
