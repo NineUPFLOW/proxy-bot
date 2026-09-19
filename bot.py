@@ -2,6 +2,7 @@
 Telegram Proxy Bot 2026.
 - Публикация в конкретную тему (Topic) Telegram-группы
 - Последовательная проверка: MTProto → WEB → SOCKS5
+- Выборка: 3 MTProto + 3 SOCKS5 + 3 WEB (добираем MTProto)
 - Умная сортировка: probe_resistant → MTProto → WEB → SOCKS5
 """
 
@@ -49,21 +50,29 @@ CHAT_ID = int(os.environ["CHAT_ID"])
 _topic_raw = os.environ.get("TOPIC_ID", "").strip()
 TOPIC_ID = int(_topic_raw) if _topic_raw else None
 
-PUBLISH_COUNT = 6
-MAX_SOCKS5_PUBLISH = 6
-MAX_WEB_PUBLISH = 6
+# ─── Публикация ───
+PUBLISH_COUNT = 9         # всего за один запуск
+TARGET_MT = 3             # цель: 3 MTProto
+TARGET_SOCKS5 = 3         # цель: 3 SOCKS5
+TARGET_WEB = 3            # цель: 3 WEB
+
 SEND_DELAY = 3
 MAX_SEND_RETRIES = 3
+
+# ─── Проверка ───
 CONCURRENCY = 20
+
+# ─── Лимиты на проверку по протоколам ───
 MAX_MT_CHECK = 200
-MAX_WEB_CHECK = 100
-MAX_SOCKS5_CHECK = 100
+MAX_WEB_CHECK = 50
+MAX_SOCKS5_CHECK = 20
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Дедупликация
 # ═══════════════════════════════════════════════════════════════════════
 def dedup_by_ip_port(proxies: list) -> list:
+    """Оставляет по одному прокси на IP:port (лучший по score)."""
     best = {}
     for p in proxies:
         key = (p["ip"], p["port"])
@@ -111,7 +120,8 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
             )
             return True
         except TelegramRetryAfter as e:
-            logger.warning("Flood control, ждём %ss", e.retry_after)
+            logger.warning("Flood control, ждём %ss (попытка %s/%s)",
+                           e.retry_after, attempt, MAX_SEND_RETRIES)
             await asyncio.sleep(e.retry_after + 1)
         except TelegramAPIError as e:
             logger.error("Ошибка публикации %s: %s", p.get("id"), e)
@@ -126,6 +136,7 @@ async def send_with_retry(bot: Bot, p: dict) -> bool:
 # Проверка группы прокси
 # ═══════════════════════════════════════════════════════════════════════
 async def check_group(group: list, name: str) -> list:
+    """Проверяет группу прокси параллельно, возвращает рабочие."""
     if not group:
         return []
 
@@ -161,6 +172,7 @@ async def run(bot: Bot):
     state.init_db()
     state.cleanup()
 
+    # ─── 1. Сбор ───
     raw_list = await fetch_all_proxies()
     if not raw_list:
         logger.warning("Источники пусты")
@@ -168,6 +180,7 @@ async def run(bot: Bot):
 
     raw_list = dedup_by_ip_port(raw_list)
 
+    # ─── 2. Разделение по протоколам ───
     mtproto = [r for r in raw_list if r.get("protocol") == "MTPROTO"]
     web = [r for r in raw_list if r.get("protocol") == "WEB"]
     socks5 = [r for r in raw_list if r.get("protocol") == "SOCKS5"]
@@ -177,6 +190,7 @@ async def run(bot: Bot):
         len(mtproto), len(web), len(socks5), len(raw_list),
     )
 
+    # ─── 3. Последовательная проверка: MTProto → WEB → SOCKS5 ───
     all_working = []
 
     random.shuffle(mtproto)
@@ -197,6 +211,7 @@ async def run(bot: Bot):
         logger.info("Ни один прокси не прошёл проверку")
         return
 
+    # ─── 4. Фильтрация опубликованных ───
     all_working = state.filter_unpublished(all_working)
     all_working = dedup_by_ip_port(all_working)
 
@@ -205,10 +220,12 @@ async def run(bot: Bot):
         logger.info("Все рабочие прокси уже публиковались")
         return
 
+    # ─── 5. Умная сортировка ───
     def sort_key(p):
         proto = p["protocol"]
         probe = p.get("probe_resistant", False)
         ping = p.get("ping", 99999)
+
         if proto == "MTPROTO" and probe:
             group = 0
         elif proto == "MTPROTO":
@@ -217,6 +234,7 @@ async def run(bot: Bot):
             group = 2
         else:
             group = 3
+
         return (group, ping)
 
     all_working.sort(key=sort_key)
@@ -230,6 +248,7 @@ async def run(bot: Bot):
             p.get("ping", "?"), p.get("score", "?"), probe_mark,
         )
 
+    # ─── 6. Формирование выборки: 3 MT + 3 SOCKS5 + 3 WEB ───
     probe_mt = [p for p in all_working
                 if p["protocol"] == "MTPROTO" and p.get("probe_resistant")]
     normal_mt = [p for p in all_working
@@ -237,27 +256,67 @@ async def run(bot: Bot):
     web_ok = [p for p in all_working if p["protocol"] == "WEB"]
     socks_ok = [p for p in all_working if p["protocol"] == "SOCKS5"]
 
-    final = []
-    final.extend(probe_mt[:PUBLISH_COUNT])
-    remaining = PUBLISH_COUNT - len(final)
+    # MTProto-пул: сначала probe, потом обычные
+    mt_pool = probe_mt + normal_mt
 
-    if remaining > 0:
-        final.extend(normal_mt[:remaining])
-        remaining = PUBLISH_COUNT - len(final)
+    # Берём по цели из каждой категории
+    picked_mt = mt_pool[:TARGET_MT]
+    picked_socks = socks_ok[:TARGET_SOCKS5]
+    picked_web = web_ok[:TARGET_WEB]
 
-    if remaining > 0 and web_ok:
-        final.extend(web_ok[:min(remaining, MAX_WEB_PUBLISH)])
-        remaining = PUBLISH_COUNT - len(final)
+    final = picked_mt + picked_socks + picked_web
 
-    if remaining > 0 and socks_ok:
-        final.extend(socks_ok[:min(remaining, MAX_SOCKS5_PUBLISH)])
+    # Добираем MTProto, если чего-то не хватило
+    if len(final) < PUBLISH_COUNT:
+        used_keys = {(p["ip"], p["port"]) for p in final}
+        for p in mt_pool:
+            key = (p["ip"], p["port"])
+            if key in used_keys:
+                continue
+            final.append(p)
+            used_keys.add(key)
+            if len(final) >= PUBLISH_COUNT:
+                break
+
+    # Добиваем WEB, если всё ещё мало
+    if len(final) < PUBLISH_COUNT:
+        used_keys = {(p["ip"], p["port"]) for p in final}
+        for p in web_ok:
+            key = (p["ip"], p["port"])
+            if key in used_keys:
+                continue
+            final.append(p)
+            used_keys.add(key)
+            if len(final) >= PUBLISH_COUNT:
+                break
+
+    # И в самом крайнем случае — SOCKS5
+    if len(final) < PUBLISH_COUNT:
+        used_keys = {(p["ip"], p["port"]) for p in final}
+        for p in socks_ok:
+            key = (p["ip"], p["port"])
+            if key in used_keys:
+                continue
+            final.append(p)
+            used_keys.add(key)
+            if len(final) >= PUBLISH_COUNT:
+                break
 
     final = dedup_by_ip_port(final)
+
+    logger.info(
+        "Выборка: MTProto=%s SOCKS5=%s WEB=%s | всего=%s",
+        sum(1 for p in final if p["protocol"] == "MTPROTO"),
+        sum(1 for p in final if p["protocol"] == "SOCKS5"),
+        sum(1 for p in final if p["protocol"] == "WEB"),
+        len(final),
+    )
 
     if not final:
         logger.info("Нет прокси для публикации")
         return
 
+    # ─── 7. Публикация ───
     logger.info("Публикуем %s прокси", len(final))
     published_ips = set()
     published_ok = 0
