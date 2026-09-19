@@ -31,10 +31,32 @@ def _normalize_proxy(proxy: dict) -> dict:
     return {"ip": ip, "port": int(port), "protocol": protocol}
 
 
-def _proxy_hash(proxy: dict) -> str:
-    p = _normalize_proxy(proxy)
+def _hash_from_normalized(p: dict) -> str:
+    """Хэш из уже нормализованного прокси (без повторной валидации)."""
     raw = f"{p['ip']}:{p['port']}:{p['protocol']}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _proxy_hash(proxy: dict) -> str:
+    """Хэш из произвольного прокси (валидирует и нормализует сам)."""
+    return _hash_from_normalized(_normalize_proxy(proxy))
+
+
+def _parse_ping_ms(value) -> int | None:
+    """Приводит 'ping' к целому числу ms, если возможно."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip().lower().replace("ms", "").strip()
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return None
+    return None
 
 
 @contextmanager
@@ -111,7 +133,7 @@ def is_seen(proxy: dict) -> bool:
 
 def mark_seen(proxy: dict):
     p = _normalize_proxy(proxy)
-    h = _proxy_hash(p)
+    h = _hash_from_normalized(p)
     now = time.time()
     with _connect() as conn:
         conn.execute("""
@@ -137,11 +159,12 @@ def is_published(proxy: dict) -> bool:
 
 def mark_published(proxy: dict):
     p = _normalize_proxy(proxy)
-    h = _proxy_hash(p)
+    h = _hash_from_normalized(p)
     now = time.time()
     ping = proxy.get("ping_ms")
     if ping is None:
         ping = proxy.get("ping")
+    ping_ms = _parse_ping_ms(ping)
     with _connect() as conn:
         conn.execute("""
             INSERT INTO published_proxies
@@ -150,77 +173,52 @@ def mark_published(proxy: dict):
             ON CONFLICT(hash) DO UPDATE SET
                 published_at = excluded.published_at,
                 ping_ms = excluded.ping_ms
-        """, (h, p["ip"], p["port"], p["protocol"], now, ping))
+        """, (h, p["ip"], p["port"], p["protocol"], now, ping_ms))
+
+
+def _bulk_filter(proxies: list, table: str, time_col: str, ttl: int) -> list:
+    """
+    Общая логика для filter_unseen / filter_unpublished.
+    Возвращает ОРИГИНАЛЬНЫЕ прокси, которых нет в таблице за TTL.
+    """
+    if not proxies:
+        return []
+
+    pairs = []
+    for item in proxies:
+        try:
+            h = _proxy_hash(item)
+        except (TypeError, ValueError):
+            continue
+        pairs.append((item, h))
+
+    if not pairs:
+        return []
+
+    hashes = [h for _, h in pairs]
+    cutoff = time.time() - ttl
+    placeholders = ",".join("?" for _ in hashes)
+    query = (
+        f"SELECT hash FROM {table} "
+        f"WHERE hash IN ({placeholders}) AND {time_col} > ?"
+    )
+    with _connect() as conn:
+        blocked = {
+            row[0]
+            for row in conn.execute(query, (*hashes, cutoff)).fetchall()
+        }
+
+    return [item for item, h in pairs if h not in blocked]
 
 
 def filter_unseen(proxies: list) -> list:
-    """Возвращает оригинальные прокси со всеми дополнительными полями."""
-    if not proxies:
-        return []
-
-    pairs = []
-    for item in proxies:
-        try:
-            h = _proxy_hash(item)
-        except (TypeError, ValueError):
-            continue
-        pairs.append((item, h))
-
-    if not pairs:
-        return []
-
-    hashes = [h for _, h in pairs]
-    cutoff = time.time() - SEEN_TTL
-    placeholders = ",".join("?" for _ in hashes)
-    with _connect() as conn:
-        seen_hashes = {
-            row[0]
-            for row in conn.execute(
-                f"""
-                SELECT hash
-                FROM seen_proxies
-                WHERE hash IN ({placeholders}) AND last_seen > ?
-                """,
-                (*hashes, cutoff),
-            ).fetchall()
-        }
-
-    return [item for item, h in pairs if h not in seen_hashes]
+    """Оригинальные прокси, не встречавшиеся в seen за SEEN_TTL."""
+    return _bulk_filter(proxies, "seen_proxies", "last_seen", SEEN_TTL)
 
 
 def filter_unpublished(proxies: list) -> list:
-    """Возвращает оригинальные прокси со всеми дополнительными полями."""
-    if not proxies:
-        return []
-
-    pairs = []
-    for item in proxies:
-        try:
-            h = _proxy_hash(item)
-        except (TypeError, ValueError):
-            continue
-        pairs.append((item, h))
-
-    if not pairs:
-        return []
-
-    hashes = [h for _, h in pairs]
-    cutoff = time.time() - PUBLISHED_TTL
-    placeholders = ",".join("?" for _ in hashes)
-    with _connect() as conn:
-        published_hashes = {
-            row[0]
-            for row in conn.execute(
-                f"""
-                SELECT hash
-                FROM published_proxies
-                WHERE hash IN ({placeholders}) AND published_at > ?
-                """,
-                (*hashes, cutoff),
-            ).fetchall()
-        }
-
-    return [item for item, h in pairs if h not in published_hashes]
+    """Оригинальные прокси, не публиковавшиеся за PUBLISHED_TTL."""
+    return _bulk_filter(proxies, "published_proxies", "published_at", PUBLISHED_TTL)
 
 
 def cleanup():
