@@ -5,6 +5,7 @@ Telegram Proxy Bot 2026.
 - Выборка: 3 MTProto + 3 SOCKS5 + 3 WEB (добираем MTProto)
 - Умная сортировка: probe_resistant → MTProto → WEB → SOCKS5
 - В seen пишутся ВСЕ проверенные прокси (включая мёртвые)
+- Фильтрация через seen ДО среза по лимиту
 """
 
 import asyncio
@@ -64,7 +65,7 @@ MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
 
 # ─── Лимиты на проверку по протоколам ───
-MAX_MT_CHECK = 200
+MAX_MT_CHECK = 300        # было 200 — теперь 300 (щедящий прирост)
 MAX_WEB_CHECK = 50
 MAX_SOCKS5_CHECK = 100
 
@@ -145,16 +146,11 @@ async def check_group(group: list, name: str) -> list:
     if not group:
         return []
 
-    fresh = state.filter_unseen(group)
-    if not fresh:
-        logger.info("%s: все уже просканированы", name)
-        return []
-
-    logger.info("%s: проверяем %s прокси", name, len(fresh))
+    logger.info("%s: проверяем %s прокси", name, len(group))
 
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(
-        *[check_with_semaphore(sem, r) for r in fresh]
+        *[check_with_semaphore(sem, r) for r in group]
     )
     working = [r for r in results if r]
     working = dedup_by_ip_port(working)
@@ -196,20 +192,28 @@ async def run(bot: Bot):
     )
 
     # ─── 3. Последовательная проверка: MTProto → WEB → SOCKS5 ───
+    # ВАЖНО: сначала фильтруем ВЕСЬ пул через seen, потом берём лимит.
+    # Это даёт +300 новых прокси в seen за запуск вместо +2.
     all_working = []
 
     random.shuffle(mtproto)
-    mt_proxies = await check_group(mtproto[:MAX_MT_CHECK], "MTProto")
+    fresh_mt = state.filter_unseen(mtproto)
+    logger.info("MTProto: свежих=%s из %s", len(fresh_mt), len(mtproto))
+    mt_proxies = await check_group(fresh_mt[:MAX_MT_CHECK], "MTProto")
     all_working.extend(mt_proxies)
 
     if web:
         random.shuffle(web)
-        web_proxies = await check_group(web[:MAX_WEB_CHECK], "WEB")
+        fresh_web = state.filter_unseen(web)
+        logger.info("WEB: свежих=%s из %s", len(fresh_web), len(web))
+        web_proxies = await check_group(fresh_web[:MAX_WEB_CHECK], "WEB")
         all_working.extend(web_proxies)
 
     if socks5:
         random.shuffle(socks5)
-        socks_proxies = await check_group(socks5[:MAX_SOCKS5_CHECK], "SOCKS5")
+        fresh_socks = state.filter_unseen(socks5)
+        logger.info("SOCKS5: свежих=%s из %s", len(fresh_socks), len(socks5))
+        socks_proxies = await check_group(fresh_socks[:MAX_SOCKS5_CHECK], "SOCKS5")
         all_working.extend(socks_proxies)
 
     if not all_working:
