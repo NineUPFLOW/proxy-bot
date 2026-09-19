@@ -1,8 +1,6 @@
 """
 Оформление сообщений с прокси.
-Все сообщения одинаковой высоты и структуры:
-- длинные поля обрезаются до фиксированной длины
-- количество строк всегда одинаковое
+Все сообщения одинаковой высоты и структуры.
 """
 
 from html import escape
@@ -20,7 +18,6 @@ MAX_IP = 30
 
 
 def _trunc(value: str, max_len: int) -> str:
-    """Обрезает строку до max_len, добавляя … если нужно."""
     value = str(value or "").strip()
     if len(value) <= max_len:
         return value
@@ -51,9 +48,15 @@ def build_connect_link(p: dict) -> str:
 def _proto_label(p: dict) -> str:
     proto = p["protocol"].upper()
     secret = p.get("secret", "")
+    probe = p.get("probe_resistant", False)
 
     if proto == "MTPROTO":
-        return "MTProto · Fake TLS" if secret.startswith("ee") else "MTProto"
+        label = "MTProto"
+        if secret.startswith("ee"):
+            label += " · Fake TLS"
+        if probe:
+            label += " · 🛡 PROBE"
+        return label
     if proto == "WEB":
         return "WEB · TgWebProxy"
     if proto == "SOCKS5":
@@ -74,7 +77,6 @@ def format_message(p: dict) -> str:
     pid = p.get("id", 0)
     proto_label = _proto_label(p)
 
-    # Флаг страны с fallback
     flag_str = f"{flag} {country}"
 
     return (
