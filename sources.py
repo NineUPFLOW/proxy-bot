@@ -19,7 +19,7 @@ from telethon.tl.types import MessageEntityCode, MessageEntityPre
 logger = logging.getLogger(__name__)
 
 # ─── ИСТОЧНИКИ ─────────────────────────────────────────────────────────
-    TELEGRAM_SOURCES = [
+TELEGRAM_SOURCES = [
     "urlsources",
     "DESKVPN_RUSSIA",
     "FREEVPN444",
