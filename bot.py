@@ -42,7 +42,7 @@ _topic_raw = os.environ.get("TOPIC_ID", "").strip()
 TOPIC_ID = int(_topic_raw) if _topic_raw else None
 
 # ─── Публикация ───
-PUBLISH_COUNT = 6
+PUBLISH_COUNT = 9
 TARGET_MT = 3
 TARGET_SOCKS5 = 3
 TARGET_WEB = 3
