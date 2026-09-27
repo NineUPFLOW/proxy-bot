@@ -64,9 +64,9 @@ MAX_SEND_RETRIES = 3
 CONCURRENCY = 20
 
 # ─── Лимиты на проверку ───
-MAX_MT_CHECK = 500
-MAX_WEB_CHECK = 50
-MAX_SOCKS5_CHECK = 150
+MAX_MT_CHECK = 700
+MAX_WEB_CHECK = 150
+MAX_SOCKS5_CHECK = 250
 
 
 def dedup_by_ip_port(proxies: list) -> list:
