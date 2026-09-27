@@ -1,13 +1,3 @@
-"""
-Telegram Proxy Bot 2026.
-- Публикация в конкретную тему (Topic) Telegram-группы
-- Последовательная проверка: MTProto → WEB → SOCKS5
-- Выборка: 8 MTProto + 5 SOCKS5 + 2 WEB (добираем MTProto)
-- Умная сортировка: probe_resistant → MTProto → WEB → SOCKS5
-- В seen пишутся ВСЕ проверенные прокси (включая мёртвые)
-- Уведомления в чат при пустых исходах
-"""
-
 import asyncio
 import logging
 import os
