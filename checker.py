@@ -19,6 +19,9 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
+# ─── Уровень логирования через env ─────────────────────────────────────
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
 for name in (
     "telethon",
     "telethon.network",
@@ -254,7 +257,8 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = F
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
     raw_secret = _normalize_secret(secret)
     if not raw_secret:
-        logger.info(
+        # DEBUG: подробности по каждому отсеянному прокси
+        logger.debug(
             "mtproto skip %s:%s — invalid secret %r",
             ip, port, (secret[:10] + "…") if secret else "",
         )
@@ -280,7 +284,8 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = F
     except (asyncio.TimeoutError, ConnectionError, OSError):
         return None
     except Exception as e:
-        logger.info("mtproto attempt %s:%s — %s: %s", ip, port, type(e).__name__, e)
+        # DEBUG: технические детали падений handshake
+        logger.debug("mtproto attempt %s:%s — %s: %s", ip, port, type(e).__name__, e)
         return None
     finally:
         if client is not None:
@@ -384,4 +389,4 @@ async def process_proxy(raw: dict) -> dict | None:
         return await check_mtproto(raw)
     if proto == "SOCKS5":
         return await check_socks5(raw)
-    return None 
+    return None
