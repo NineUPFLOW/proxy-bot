@@ -72,6 +72,7 @@ def dedup_by_ip_port(proxies: list) -> list:
 
 async def send_status(bot: Bot, text: str) -> bool:
     """Отправляет уведомление-статус в чат (без клавиатуры)."""
+    global TOPIC_ID
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         try:
             send_kwargs = {
@@ -87,6 +88,14 @@ async def send_status(bot: Bot, text: str) -> bool:
             return True
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
+        except TelegramAPIError as e:
+            # Если тема неверная — пробуем без неё
+            if TOPIC_ID is not None:
+                logger.warning("Ошибка с TOPIC_ID, пробуем без темы: %s", e)
+                TOPIC_ID = None
+                continue
+            logger.error("Не удалось отправить статус: %s", e)
+            return False
         except Exception as e:
             logger.error("Не удалось отправить статус: %s", e)
             return False
