@@ -30,13 +30,13 @@ for name in (
 logger = logging.getLogger(__name__)
 
 # ─── Лимиты ────────────────────────────────────────────────────────────
-MAX_PING_MS = 5000          # 5 сек — отсеивает мусор
+MAX_PING_MS = 5000
 MAX_PING_WEB_MS = 4000
 CHECK_TIMEOUT = 8
-WEB_CHECK_TIMEOUT = 10      # для WEB даём больше времени (прокси перегружены)
+WEB_CHECK_TIMEOUT = 10
 PROBE_TIMEOUT = 5
 MT_ATTEMPTS = 3
-MT_REQUIRED = 1             # достаточно 1 успешного handshake
+MT_REQUIRED = 1
 
 
 # ─── Скоринг ───────────────────────────────────────────────────────────
@@ -69,7 +69,6 @@ API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TG_SESSION = os.environ.get("TG_SESSION")
 
-# ─── Тестовые URL ──────────────────────────────────────────────────────
 TEST_URL_TG = "https://api.telegram.org"
 
 _http_session: aiohttp.ClientSession | None = None
@@ -196,23 +195,43 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict, probe_ok: bool) -> dict 
 
 def _normalize_secret(secret: str) -> str:
     """
-    Telethon для ConnectionTcpMTProxyRandomizedIntermediate ожидает
-    hex-секрет БЕЗ префикса 'dd'. Для MTProto с Fake TLS ('ee...')
-    секрет передаётся как есть.
+    Приводит секрет к форме, которую принимает Telethon.
+
+    - dd + 32 hex  → random-padded MTProxy. Отрезаем 'dd'.
+    - ee + 32 hex + domain (hex) → FakeTLS. Telethon 1.36 в
+      ConnectionTcpMTProxyRandomizedIntermediate его не умеет,
+      поэтому берём только ядро — первые 32 hex после 'ee'.
+      Прокси примет handshake, но маскировка под TLS потеряется.
+    - 32 hex без префикса → как есть.
+    - всё остальное → пустая строка (отсеется ValueError'ом).
     """
     if not secret:
         return ""
-    secret = secret.strip().lower()
-    if secret.startswith("dd"):
-        return secret[2:]
-    return secret
+    s = secret.strip().lower()
+
+    if s.startswith("dd") and len(s) == 34:
+        return s[2:]
+
+    if s.startswith("ee"):
+        core = s[2:34]
+        if len(core) == 32 and all(c in "0123456789abcdef" for c in core):
+            return core
+        return ""
+
+    if len(s) == 32 and all(c in "0123456789abcdef" for c in s):
+        return s
+
+    return ""
 
 
 async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = False) -> int | None:
     client = None
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
+    raw_secret = _normalize_secret(secret)
+    if not raw_secret:
+        logger.info("mtproto skip %s:%s — invalid secret %r", ip, port, secret[:8] + "…")
+        return None
     try:
-        raw_secret = _normalize_secret(secret)
         client = TelegramClient(
             StringSession(TG_SESSION), API_ID, API_HASH,
             connection=ConnectionTcpMTProxyRandomizedIntermediate,
@@ -226,17 +245,13 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = F
         await asyncio.wait_for(client.connect(), timeout=timeout)
         if not client.is_connected():
             return None
-        await asyncio.wait_for(
-            client(GetConfigRequest()), timeout=timeout
-        )
+        await asyncio.wait_for(client(GetConfigRequest()), timeout=timeout)
         return int((asyncio.get_running_loop().time() - t0) * 1000)
     except asyncio.CancelledError:
-        # ВАЖНО: пробрасываем дальше, иначе отмена задачи не сработает
         raise
     except (asyncio.TimeoutError, ConnectionError, OSError):
         return None
     except Exception as e:
-        # info-уровень: видно в логах GitHub Actions для диагностики
         logger.info("mtproto attempt %s:%s — %s: %s", ip, port, type(e).__name__, e)
         return None
     finally:
@@ -278,7 +293,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# SOCKS5 (только Telegram)
+# SOCKS5
 # ═══════════════════════════════════════════════════════════════════════
 
 async def check_socks5(proxy: dict) -> dict | None:
@@ -336,8 +351,6 @@ async def process_proxy(raw: dict) -> dict | None:
             return None
         return await check_mtproto(raw)
     if proto == "WEB":
-        # ИСПРАВЛЕНО: не требуем обязательный префикс 'dd'.
-        # Telegram поддерживает WEB-прокси и без него.
         if not raw.get("secret"):
             return None
         return await check_mtproto(raw)
