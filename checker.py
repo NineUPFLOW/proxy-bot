@@ -33,10 +33,11 @@ logger = logging.getLogger(__name__)
 MAX_PING_MS = 5000          # 5 сек — отсеивает мусор
 MAX_PING_WEB_MS = 4000
 CHECK_TIMEOUT = 8
-WEB_CHECK_TIMEOUT = 10
+WEB_CHECK_TIMEOUT = 10      # для WEB даём больше времени (прокси перегружены)
 PROBE_TIMEOUT = 5
 MT_ATTEMPTS = 3
 MT_REQUIRED = 1             # достаточно 1 успешного handshake
+
 
 # ─── Скоринг ───────────────────────────────────────────────────────────
 def compute_score(proxy: dict) -> int:
@@ -54,6 +55,7 @@ def compute_score(proxy: dict) -> int:
     elif proto == "WEB":
         base = 5000
     return base - min(ping, 5000)
+
 
 ALLOWED_COUNTRIES = {
     "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
@@ -77,11 +79,13 @@ _geo_semaphore = asyncio.Semaphore(5)
 PROBE_CACHE_LIMIT = 5000
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
+
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if _http_session is None or _http_session.closed:
         _http_session = aiohttp.ClientSession(headers=HEADERS)
     return _http_session
+
 
 async def close_http_session():
     global _http_session
@@ -89,12 +93,14 @@ async def close_http_session():
         await _http_session.close()
         _http_session = None
 
+
 def _is_ip(s: str) -> bool:
     try:
         ipaddress.ip_address(s)
         return True
     except ValueError:
         return False
+
 
 async def _resolve(host: str) -> str | None:
     if _is_ip(host):
@@ -108,14 +114,17 @@ async def _resolve(host: str) -> str | None:
     except Exception:
         return None
 
+
 def _stable_id(ip: str, port: int) -> str:
     raw = f"{ip}:{port}".encode()
     return hashlib.sha256(raw).hexdigest()[:12]
+
 
 def _country_flag(code: str) -> str:
     if not code or len(code) != 2:
         return "🏴"
     return chr(0x1F1E6 + ord(code[0]) - 65) + chr(0x1F1E6 + ord(code[1]) - 65)
+
 
 async def geolocate(ip: str) -> dict:
     if ip in _geo_cache:
@@ -139,6 +148,7 @@ async def geolocate(ip: str) -> dict:
     _geo_cache[ip] = {}
     return {}
 
+
 async def check_probe_resistant(domain: str) -> bool:
     if domain in _probe_cache:
         return _probe_cache[domain]
@@ -159,6 +169,7 @@ async def check_probe_resistant(domain: str) -> bool:
         _probe_cache[domain] = False
         return False
 
+
 def _enrich(proxy: dict, ip: str, ping: int, geo: dict, probe_ok: bool) -> dict | None:
     country_code = geo.get("countryCode", "")
     if country_code and country_code not in ALLOWED_COUNTRIES:
@@ -178,6 +189,7 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict, probe_ok: bool) -> dict 
     proxy["score"] = compute_score(proxy)
     return proxy
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # MTProto / WEB
 # ═══════════════════════════════════════════════════════════════════════
@@ -195,31 +207,37 @@ def _normalize_secret(secret: str) -> str:
         return secret[2:]
     return secret
 
-async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
+
+async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = False) -> int | None:
     client = None
+    timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
     try:
         raw_secret = _normalize_secret(secret)
         client = TelegramClient(
             StringSession(TG_SESSION), API_ID, API_HASH,
             connection=ConnectionTcpMTProxyRandomizedIntermediate,
             proxy=(ip, port, raw_secret),
-            timeout=CHECK_TIMEOUT,
+            timeout=timeout,
             connection_retries=0,
             retry_delay=0,
             auto_reconnect=False,
         )
         t0 = asyncio.get_running_loop().time()
-        await asyncio.wait_for(client.connect(), timeout=CHECK_TIMEOUT)
+        await asyncio.wait_for(client.connect(), timeout=timeout)
         if not client.is_connected():
             return None
         await asyncio.wait_for(
-            client(GetConfigRequest()), timeout=CHECK_TIMEOUT
+            client(GetConfigRequest()), timeout=timeout
         )
         return int((asyncio.get_running_loop().time() - t0) * 1000)
-    except (asyncio.TimeoutError, asyncio.CancelledError, ConnectionError, OSError):
+    except asyncio.CancelledError:
+        # ВАЖНО: пробрасываем дальше, иначе отмена задачи не сработает
+        raise
+    except (asyncio.TimeoutError, ConnectionError, OSError):
         return None
     except Exception as e:
-        logger.debug("mtproto attempt %s:%s — %s", ip, port, e)
+        # info-уровень: видно в логах GitHub Actions для диагностики
+        logger.info("mtproto attempt %s:%s — %s: %s", ip, port, type(e).__name__, e)
         return None
     finally:
         if client is not None:
@@ -228,16 +246,18 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str) -> int | None:
             except Exception:
                 pass
 
+
 async def check_mtproto(proxy: dict) -> dict | None:
     host = proxy["ip"]
     port = int(proxy["port"])
     secret = proxy["secret"]
+    is_web = proxy["protocol"].upper() == "WEB"
     ip = await _resolve(host)
     if not ip:
         return None
     pings: list[int] = []
     for attempt in range(MT_ATTEMPTS):
-        ping = await _one_mtproto_attempt(ip, port, secret)
+        ping = await _one_mtproto_attempt(ip, port, secret, is_web=is_web)
         if ping is not None:
             pings.append(ping)
             if len(pings) >= MT_REQUIRED:
@@ -247,7 +267,6 @@ async def check_mtproto(proxy: dict) -> dict | None:
     if len(pings) < MT_REQUIRED:
         return None
     avg_ping = sum(pings) // len(pings)
-    is_web = proxy["protocol"].upper() == "WEB"
     limit = MAX_PING_WEB_MS if is_web else MAX_PING_MS
     if avg_ping > limit:
         return None
@@ -256,6 +275,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
         probe_ok = await check_probe_resistant(proxy["mask_domain"])
     geo = await geolocate(ip)
     return _enrich(proxy, ip, avg_ping, geo, probe_ok)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # SOCKS5 (только Telegram)
@@ -293,6 +313,8 @@ async def check_socks5(proxy: dict) -> dict | None:
             return None
         geo = await geolocate(ip)
         return _enrich(proxy, ip, ping, geo, probe_ok=False)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.debug("socks5 %s:%s — %s", ip, port, e)
         return None
@@ -301,6 +323,7 @@ async def check_socks5(proxy: dict) -> dict | None:
             await connector.close()
         except Exception:
             pass
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # ГЛАВНАЯ ФУНКЦИЯ
