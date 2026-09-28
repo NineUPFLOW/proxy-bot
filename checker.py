@@ -23,9 +23,7 @@ try:
 except ImportError:
     ConnectionWebProxy = None
 
-
 logger = logging.getLogger(__name__)
-
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -67,7 +65,6 @@ TEST_URL = os.getenv(
 HEADERS = {
     "User-Agent": "proxy-bot/4.0"
 }
-
 
 ALLOWED_COUNTRIES = {
     "RU",
@@ -124,7 +121,6 @@ ALLOWED_COUNTRIES = {
     "HK",
 }
 
-
 _http_session: Optional[aiohttp.ClientSession] = None
 
 _geo_cache: dict[str, dict] = {}
@@ -132,7 +128,6 @@ _geo_cache: dict[str, dict] = {}
 _geo_sem = asyncio.Semaphore(
     MAX_GEO_CONCURRENCY
 )
-
 
 def _session() -> aiohttp.ClientSession:
     global _http_session
@@ -147,7 +142,6 @@ def _session() -> aiohttp.ClientSession:
 
     return _http_session
 
-
 async def close_http_session() -> None:
     global _http_session
 
@@ -158,7 +152,6 @@ async def close_http_session() -> None:
         await _http_session.close()
 
     _http_session = None
-
 
 def _resolve_sync(
     host: str,
@@ -185,7 +178,6 @@ def _resolve_sync(
     except OSError:
         return None
 
-
 async def resolve(
     host: str,
 ) -> str | None:
@@ -193,7 +185,6 @@ async def resolve(
         _resolve_sync,
         host,
     )
-
 
 def _decode_secret(
     secret: str,
@@ -238,7 +229,6 @@ def _decode_secret(
 
     return None
 
-
 def normalize_mt_secret(
     secret: str,
 ) -> str | None:
@@ -275,7 +265,6 @@ def normalize_mt_secret(
 
     return raw.hex()
 
-
 def _flag(code: str) -> str:
     code = (code or "").upper()
 
@@ -290,7 +279,6 @@ def _flag(code: str) -> str:
         chr(127397 + ord(code[0]))
         + chr(127397 + ord(code[1]))
     )
-
 
 async def geolocate(
     ip: str,
@@ -341,7 +329,6 @@ async def geolocate(
 
         _geo_cache[ip] = {}
         return {}
-
 
 def compute_score(
     proxy: dict,
@@ -394,7 +381,6 @@ def compute_score(
         - min(ping, 10000)
     )
 
-
 def enrich(
     proxy: dict,
     ip: str,
@@ -433,445 +419,3 @@ def enrich(
             "city": geo.get(
                 "city",
                 "Unknown",
-            ),
-
-            "provider": geo.get(
-                "isp",
-                "Unknown",
-            ),
-
-            "flag": _flag(
-                country_code
-            ),
-
-            "check_origin": "github-runner",
-        }
-    )
-
-    raw_id = (
-        f"{result.get('protocol')}"
-        f"|{result.get('ip')}"
-        f"|{result.get('port')}"
-        f"|{result.get('secret', '')}"
-    )
-
-    result["id"] = hashlib.sha256(
-        raw_id.encode("utf-8")
-    ).hexdigest()[:12]
-
-    result["score"] = compute_score(
-        result
-    )
-
-    return result
-
-
-async def _mt_attempt(
-    host: str,
-    port: int,
-    secret: str,
-) -> int | None:
-
-    normalized = normalize_mt_secret(
-        secret
-    )
-
-    if normalized is None:
-        return None
-
-    client = TelegramClient(
-        StringSession(""),
-        API_ID,
-        API_HASH,
-        connection=(
-            connection
-            .ConnectionTcpMTProxyRandomizedIntermediate
-        ),
-        proxy=(
-            host,
-            port,
-            normalized,
-        ),
-        timeout=CHECK_TIMEOUT,
-        connection_retries=0,
-        retry_delay=0,
-        auto_reconnect=False,
-    )
-
-    started = (
-        asyncio
-        .get_running_loop()
-        .time()
-    )
-
-    try:
-        await asyncio.wait_for(
-            client.connect(),
-            CHECK_TIMEOUT,
-        )
-
-        if not client.is_connected():
-            return None
-
-        await asyncio.wait_for(
-            client(
-                GetConfigRequest()
-            ),
-            CHECK_TIMEOUT,
-        )
-
-        elapsed = (
-            asyncio
-            .get_running_loop()
-            .time()
-            - started
-        )
-
-        return int(
-            elapsed * 1000
-        )
-
-    except asyncio.CancelledError:
-        raise
-
-    except Exception:
-        logger.debug(
-            "MTProto check failed "
-            "for %s:%s",
-            host,
-            port,
-            exc_info=True,
-        )
-        return None
-
-    finally:
-        try:
-            await asyncio.wait_for(
-                client.disconnect(),
-                2,
-            )
-        except Exception:
-            pass
-
-
-async def check_mtproto(
-    proxy: dict,
-) -> dict | None:
-
-    host = str(
-        proxy.get("ip", "")
-    ).strip()
-
-    try:
-        port = int(
-            proxy.get(
-                "port",
-                0,
-            )
-        )
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return None
-
-    if (
-        not host
-        or not 1 <= port <= 65535
-    ):
-        return None
-
-    ip = await resolve(host)
-
-    if not ip:
-        return None
-
-    for attempt in range(2):
-
-        ping = await _mt_attempt(
-            ip,
-            port,
-            str(
-                proxy.get(
-                    "secret",
-                    "",
-                )
-            ),
-        )
-
-        if ping is not None:
-
-            if ping > MAX_PING_MS:
-                return None
-
-            geo = await geolocate(ip)
-
-            return enrich(
-                proxy,
-                ip,
-                ping,
-                geo,
-            )
-
-        if attempt == 0:
-            await asyncio.sleep(0.2)
-
-    return None
-
-
-async def check_web(
-    proxy: dict,
-) -> dict | None:
-
-    if ConnectionWebProxy is None:
-        logger.error(
-            "telethon-webproxy is not installed"
-        )
-        return None
-
-    host = str(
-        proxy.get("ip", "")
-    ).strip().lower()
-
-    secret = normalize_mt_secret(
-        str(
-            proxy.get(
-                "secret",
-                "",
-            )
-        )
-    )
-
-    if not host or secret is None:
-        return None
-
-    client = TelegramClient(
-        StringSession(""),
-        API_ID,
-        API_HASH,
-        connection=ConnectionWebProxy,
-        proxy=(
-            host,
-            secret,
-            {
-                "mode": os.getenv(
-                    "WEB_PROXY_MODE",
-                    "websocket-lanes",
-                )
-            },
-        ),
-        timeout=WEB_CHECK_TIMEOUT,
-        connection_retries=0,
-        retry_delay=0,
-        auto_reconnect=False,
-    )
-
-    started = (
-        asyncio
-        .get_running_loop()
-        .time()
-    )
-
-    try:
-        await asyncio.wait_for(
-            client.connect(),
-            WEB_CHECK_TIMEOUT,
-        )
-
-        if not client.is_connected():
-            return None
-
-        await asyncio.wait_for(
-            client(
-                GetConfigRequest()
-            ),
-            WEB_CHECK_TIMEOUT,
-        )
-
-        ping = int(
-            (
-                asyncio
-                .get_running_loop()
-                .time()
-                - started
-            )
-            * 1000
-        )
-
-        if ping > MAX_WEB_PING_MS:
-            return None
-
-        ip = await resolve(host)
-
-        if not ip:
-            return None
-
-        geo = await geolocate(ip)
-
-        return enrich(
-            proxy,
-            ip,
-            ping,
-            geo,
-        )
-
-    except asyncio.CancelledError:
-        raise
-
-    except Exception:
-        logger.debug(
-            "WEB proxy check failed "
-            "for %s",
-            host,
-            exc_info=True,
-        )
-        return None
-
-    finally:
-        try:
-            await asyncio.wait_for(
-                client.disconnect(),
-                3,
-            )
-        except Exception:
-            pass
-
-
-async def check_socks5(
-    proxy: dict,
-) -> dict | None:
-
-    host = str(
-        proxy.get("ip", "")
-    ).strip()
-
-    try:
-        port = int(
-            proxy.get(
-                "port",
-                0,
-            )
-        )
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return None
-
-    if (
-        not host
-        or not 1 <= port <= 65535
-    ):
-        return None
-
-    ip = await resolve(host)
-
-    if not ip:
-        return None
-
-    connector = ProxyConnector(
-        proxy_type=ProxyType.SOCKS5,
-        host=host,
-        port=port,
-        rdns=True,
-    )
-
-    started = (
-        asyncio
-        .get_running_loop()
-        .time()
-    )
-
-    try:
-        timeout = aiohttp.ClientTimeout(
-            total=SOCKS_CHECK_TIMEOUT
-        )
-
-        async with aiohttp.ClientSession(
-            connector=connector,
-            connector_owner=True,
-            headers=HEADERS,
-        ) as session:
-
-            async with session.get(
-                TEST_URL,
-                timeout=timeout,
-                allow_redirects=False,
-            ) as response:
-
-                await response.read(
-                    64 * 1024
-                )
-
-                if response.status >= 500:
-                    return None
-
-        ping = int(
-            (
-                asyncio
-                .get_running_loop()
-                .time()
-                - started
-            )
-            * 1000
-        )
-
-        if ping > MAX_PING_MS:
-            return None
-
-        geo = await geolocate(ip)
-
-        return enrich(
-            proxy,
-            ip,
-            ping,
-            geo,
-        )
-
-    except asyncio.CancelledError:
-        raise
-
-    except Exception:
-        logger.debug(
-            "SOCKS5 check failed "
-            "for %s:%s",
-            host,
-            port,
-            exc_info=True,
-        )
-        return None
-
-    finally:
-        try:
-            connector.close()
-        except Exception:
-            pass
-
-
-async def process_proxy(
-    proxy: dict,
-) -> dict | None:
-
-    proto = str(
-        proxy.get(
-            "protocol",
-            "",
-        )
-    ).upper()
-
-    if proto == "MTPROTO":
-        return await check_mtproto(
-            proxy
-        )
-
-    if proto == "WEB":
-        return await check_web(
-            proxy
-        )
-
-    if proto == "SOCKS5":
-        return await check_socks5(
-            proxy
-        )
-
-    return None
