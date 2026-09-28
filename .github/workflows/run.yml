@@ -7,9 +7,9 @@ on:
 
 # ─── Запрет параллельных запусков ───
 # Без этого два запуска с разных IP убивают TG_SESSION.
-concurrency:
-  group: proxy-bot-run
-  cancel-in-progress: false   # новый ждёт, старый доигрывает
+#concurrency:
+#  group: proxy-bot-run
+#  cancel-in-progress: false   # новый ждёт, старый доигрывает
 
 jobs:
   run:
