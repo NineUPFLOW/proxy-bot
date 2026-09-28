@@ -63,6 +63,8 @@ RE_URL = re.compile(
     r"(?:tg://(?:proxy|socks|webproxy)\?[^\s<>\"']+|(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:proxy|socks|webproxy)\?[^\s<>\"']+|socks5?://[^\s<>\"']+)",
     re.I,
 )
+# Строка явно про SOCKS — тогда из неё можно извлекать bare IP:port
+RE_SOCKS_CONTEXT = re.compile(r"\bsocks5?\b", re.I)
 
 
 def _clean_url(value: str) -> str:
@@ -122,24 +124,38 @@ def _parse_proxy(url: str) -> dict | None:
                 proxy = {"protocol": "MTPROTO", "ip": host, "port": port, "secret": secret, "raw": url}
                 analyze_secret(proxy)
                 return proxy
+
         if low.startswith("tg://socks") or "/socks?" in low:
             q = _qs(url)
             host = unquote(q.get("server", "")).strip()
             port = _valid_port(q.get("port"))
             if _valid_host(host) and port:
-                return {"protocol": "SOCKS5", "ip": host, "port": port, "raw": url}
+                result = {"protocol": "SOCKS5", "ip": host, "port": port, "raw": url}
+                user = unquote(q.get("user", "")).strip()
+                password = unquote(q.get("pass", "")).strip()
+                if user or password:
+                    result["user"] = user
+                    result["pass"] = password
+                return result
+
         if low.startswith("tg://webproxy") or "/webproxy?" in low:
             q = _qs(url)
             host = unquote(q.get("server", q.get("host", ""))).strip().lower()
             secret = unquote(q.get("secret", "")).strip()
             if _valid_host(host) and _valid_secret(secret):
                 return {"protocol": "WEB", "ip": host, "port": 443, "secret": secret, "raw": url}
+
         if low.startswith(("socks5://", "socks://")):
             parsed = urlparse(url)
             host = parsed.hostname or ""
             port = _valid_port(parsed.port)
             if _valid_host(host) and port:
-                return {"protocol": "SOCKS5", "ip": host, "port": port, "raw": url}
+                result = {"protocol": "SOCKS5", "ip": host, "port": port, "raw": url}
+                if parsed.username:
+                    result["user"] = unquote(parsed.username)
+                if parsed.password:
+                    result["pass"] = unquote(parsed.password)
+                return result
     except (ValueError, TypeError):
         return None
     return None
@@ -163,8 +179,14 @@ def extract_from_text(text: str) -> list[dict]:
     candidates.extend(m.group(1) for m in RE_MARKDOWN.finditer(text))
     candidates.extend(m.group(1) for m in RE_HTML_HREF.finditer(text))
     candidates.extend(m.group(0) for m in RE_URL.finditer(text))
+
+    # ─── Bare IP:port — только из строк, где явно упоминается SOCKS ───
+    # Иначе любая IP-строка из VPN-канала становится "SOCKS5-прокси" и
+    # забивает очередь проверки мусором (95 кандидатов → 0 рабочих).
     for line in text.splitlines():
-        candidates.extend(line.split())
+        if RE_SOCKS_CONTEXT.search(line):
+            candidates.extend(line.split())
+
     result: list[dict] = []
     seen: set[str] = set()
     for token in candidates:
@@ -209,6 +231,8 @@ def _dedup(proxies: list[dict]) -> list[dict]:
                 str(proxy.get("ip", "")).lower(),
                 int(proxy.get("port", 0)),
                 str(proxy.get("secret", "")).lower(),
+                str(proxy.get("user", "")),
+                str(proxy.get("pass", "")),
             )
         except (TypeError, ValueError):
             continue
