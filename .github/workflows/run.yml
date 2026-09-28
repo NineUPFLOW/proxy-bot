@@ -3,6 +3,7 @@ name: run
 on:
   workflow_dispatch:
 # ─── Запрет параллельных запусков ───
+# Без этого два запуска с разных IP убивают TG_SESSION.
 concurrency:
   group: proxy-bot-run
   cancel-in-progress: false
@@ -54,9 +55,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: proxy_state.db
-          key: proxy-state-v1
+          key: proxy-state-${{ github.run_id }}
           restore-keys: |
-            proxy-state-v1
             proxy-state-
 
       - name: Syntax check
@@ -147,4 +147,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: proxy_state.db
-          key: proxy-state-v1
+          key: proxy-state-${{ github.run_id }}
