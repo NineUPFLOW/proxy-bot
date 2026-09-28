@@ -243,10 +243,8 @@ def _parse_tg_webproxy(line: str):
             logger.debug("WEB: невалидный secret %r", secret)
             return None
 
-        # ─── Приводим к dd-форме ───
-        if not secret.startswith("dd"):
-            secret = "dd" + secret
-
+        # ─── ИСПРАВЛЕНО: секрет сохраняем как есть, без принудительного dd.
+        # Нормализацию выполняет checker.py перед передачей в Telethon.
         return {
             "protocol": "WEB",
             "ip": server,
@@ -523,4 +521,4 @@ async def fetch_all_proxies() -> list:
 
     stats = Counter(p["protocol"] for p in result)
     logger.info("Всего собрано: %s | %s", len(result), dict(stats))
-    return result 
+    return result
