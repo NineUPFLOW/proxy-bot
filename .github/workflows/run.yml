@@ -2,6 +2,8 @@ name: proxy-bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
 
 concurrency:
   group: proxy-bot
@@ -13,14 +15,13 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
+    timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -40,33 +41,15 @@ jobs:
         run: |
           python - <<'PY'
           import os
-
-          required = [
-              "BOT_TOKEN",
-              "CHAT_ID",
-              "API_ID",
-              "API_HASH",
-              "TG_SESSION",
-          ]
-
-          missing = [
-              name for name in required
-              if not os.getenv(name)
-          ]
-
+          required = ["BOT_TOKEN", "CHAT_ID", "API_ID", "API_HASH", "TG_SESSION"]
+          missing = [x for x in required if not os.getenv(x)]
           if missing:
-              raise SystemExit(
-                  "Missing secrets: " + ", ".join(missing)
-              )
-
+              raise SystemExit("Missing secrets: " + ", ".join(missing))
           try:
               int(os.environ["CHAT_ID"])
               int(os.environ["API_ID"])
           except ValueError as exc:
-              raise SystemExit(
-                  "CHAT_ID and API_ID must be integers"
-              ) from exc
-
+              raise SystemExit("CHAT_ID and API_ID must be integers") from exc
           print("Secrets validation passed")
           PY
 
@@ -79,13 +62,7 @@ jobs:
             proxy-state-
 
       - name: Syntax check
-        run: |
-          python -m compileall -q \
-            bot.py \
-            checker.py \
-            formatter.py \
-            sources.py \
-            state.py
+        run: python -m compileall -q bot.py checker.py formatter.py sources.py state.py
 
       - name: Import and smoke test
         env:
@@ -97,35 +74,16 @@ jobs:
           STATE_DB: smoke_state.db
         run: |
           python - <<'PY'
-          import bot
-          import checker
-          import formatter
-          import sources
-          import state
-
-          sample = (
-              "tg://proxy?"
-              "server=127.0.0.1&"
-              "port=443&"
-              "secret=0123456789abcdef0123456789abcdef"
-          )
-
+          import bot, checker, formatter, sources, state
+          sample = "tg://proxy?server=127.0.0.1&port=443&secret=0123456789abcdef0123456789abcdef"
           parsed = sources.extract_from_text(sample)
-
-          assert len(parsed) == 1
-          assert parsed[0]["protocol"] == "MTPROTO"
-
-          link = formatter.build_connect_link(parsed[0])
-          assert link.startswith("tg://proxy?")
-
+          assert len(parsed) == 1 and parsed[0]["protocol"] == "MTPROTO"
+          assert formatter.build_connect_link(parsed[0]).startswith("tg://proxy?")
           state.init_db()
-
           assert state.count_seen() == 0
           assert state.count_published() == 0
-
           print("Import and smoke test passed")
           PY
-
           rm -f smoke_state.db
 
       - name: Run bot
@@ -133,47 +91,34 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TOPIC_ID: ${{ secrets.TOPIC_ID }}
-
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-
           LOG_LEVEL: INFO
-
           PUBLISH_COUNT: 9
           TARGET_MT: 3
           TARGET_SOCKS5: 3
           TARGET_WEB: 3
-
           CONCURRENCY: 15
-
           MAX_MT_CHECK: 500
           MAX_SOCKS5_CHECK: 200
           MAX_WEB_CHECK: 100
-
           CHECK_TIMEOUT: 8
           WEB_CHECK_TIMEOUT: 15
           SOCKS_CHECK_TIMEOUT: 8
-
           MAX_PING_MS: 5000
           MAX_WEB_PING_MS: 10000
-
           GEO_TIMEOUT: 5
           MAX_GEO_CONCURRENCY: 5
-
           SEEN_TTL: 1800
           PUBLISHED_TTL: 21600
           SOURCE_STATS_TTL: 604800
-
           MESSAGES_LIMIT: 200
           THREAD_LIMIT: 80
           SOURCE_TIMEOUT: 30
           SOURCE_DELAY: 1
-
           SOCKS_TEST_URL: https://api.telegram.org
-
           WEB_PROXY_MODE: websocket-lanes
-
         run: python -u bot.py
 
       - name: State statistics
@@ -182,56 +127,19 @@ jobs:
           if [ -f proxy_state.db ]; then
             python - <<'PY'
           import sqlite3
-          from pathlib import Path
-
-          db_path = Path("proxy_state.db")
-
+          db_path = "proxy_state.db"
           try:
               with sqlite3.connect(db_path) as db:
-                  tables = {
-                      row[0]
-                      for row in db.execute(
-                          "SELECT name "
-                          "FROM sqlite_master "
-                          "WHERE type='table'"
-                      )
-                  }
-
-                  if {
-                      "seen_proxies",
-                      "published_proxies",
-                      "source_stats",
-                  } <= tables:
-                      seen = db.execute(
-                          "SELECT COUNT(*) "
-                          "FROM seen_proxies"
-                      ).fetchone()[0]
-
-                      published = db.execute(
-                          "SELECT COUNT(*) "
-                          "FROM published_proxies"
-                      ).fetchone()[0]
-
-                      sources = db.execute(
-                          "SELECT COUNT(*) "
-                          "FROM source_stats"
-                      ).fetchone()[0]
-
-                      print(
-                          f"seen={seen} "
-                          f"published={published} "
-                          f"sources={sources}"
-                      )
+                  tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                  if {"seen_proxies", "published_proxies", "source_stats"} <= tables:
+                      seen = db.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
+                      published = db.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+                      sources = db.execute("SELECT COUNT(*) FROM source_stats").fetchone()[0]
+                      print(f"seen={seen} published={published} sources={sources}")
                   else:
-                      print(
-                          "state database exists "
-                          "but schema is incomplete"
-                      )
-
+                      print("state database exists but schema is incomplete")
           except sqlite3.Error as exc:
-              print(
-                  f"state statistics unavailable: {exc}"
-              )
+              print(f"state statistics unavailable: {exc}")
           PY
           else
             echo "state database was not created"
