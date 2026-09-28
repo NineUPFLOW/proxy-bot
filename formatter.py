@@ -1,16 +1,12 @@
 """
 Оформление сообщений с прокси.
-Все сообщения одинаковой высоты и структуры.
+Добавлена эвристика определения страны по домену для WEB-прокси.
 """
 
 from html import escape
-
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  НАСТРОЙКИ ОБРЕЗКИ
-# ═══════════════════════════════════════════════════════════════════════
+# ─── НАСТРОЙКИ ОБРЕЗКИ ─────────────────────────────────────────────────
 MAX_COUNTRY = 16
 MAX_CITY = 16
 MAX_PROVIDER = 22
@@ -24,9 +20,41 @@ def _trunc(value: str, max_len: int) -> str:
     return value[: max_len - 1].rstrip() + "…"
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ
-# ═══════════════════════════════════════════════════════════════════════
+# ─── ЭВРИСТИКА ПО TLD ──────────────────────────────────────────────────
+_TLD_MAP = {
+    ".ru": ("Russia", "🇷🇺"),
+    ".de": ("Germany", "🇩🇪"),
+    ".nl": ("Netherlands", "🇳🇱"),
+    ".fr": ("France", "🇫🇷"),
+    ".us": ("United States", "🇺🇸"),
+    ".co.uk": ("United Kingdom", "🇬🇧"),
+    ".uk": ("United Kingdom", "🇬🇧"),
+    ".ir": ("Iran", "🇮🇷"),
+    ".fi": ("Finland", "🇫🇮"),
+    ".se": ("Sweden", "🇸🇪"),
+    ".pl": ("Poland", "🇵🇱"),
+    ".tr": ("Turkey", "🇹🇷"),
+    ".it": ("Italy", "🇮🇹"),
+    ".es": ("Spain", "🇪🇸"),
+    ".ch": ("Switzerland", "🇨🇭"),
+    ".at": ("Austria", "🇦🇹"),
+    ".cz": ("Czechia", "🇨🇿"),
+    ".ro": ("Romania", "🇷🇴"),
+    ".bg": ("Bulgaria", "🇧🇬"),
+}
+
+
+def guess_country_by_domain(domain: str) -> tuple[str, str]:
+    """Возвращает (country, flag) по TLD домена."""
+    if not domain:
+        return ("Unknown", "🏳️")
+    for tld in sorted(_TLD_MAP.keys(), key=len, reverse=True):
+        if domain.endswith(tld):
+            return _TLD_MAP[tld]
+    return ("Unknown", "🏳️")
+
+
+# ─── ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ ────────────────────────────────────────────
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
     ip, port = p["ip"], p["port"]
@@ -42,20 +70,17 @@ def build_connect_link(p: dict) -> str:
     return ""
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ЛЕЙБЛ ПРОТОКОЛА
-# ═══════════════════════════════════════════════════════════════════════
+# ─── ЛЕЙБЛ ПРОТОКОЛА ───────────────────────────────────────────────────
 def _proto_label(p: dict) -> str:
     proto = p["protocol"].upper()
     secret = p.get("secret", "")
     probe = p.get("probe_resistant", False)
-
     if proto == "MTPROTO":
         label = "MTProto"
         if secret.startswith("ee"):
             label += " · Fake TLS"
         if probe:
-            label += " · 🛡 PROBE"
+            label += " · PROBE"
         return label
     if proto == "WEB":
         return "WEB · TgWebProxy"
@@ -64,9 +89,7 @@ def _proto_label(p: dict) -> str:
     return proto
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ФОРМАТ СООБЩЕНИЯ
-# ═══════════════════════════════════════════════════════════════════════
+# ─── ФОРМАТ СООБЩЕНИЯ ──────────────────────────────────────────────────
 def format_message(p: dict) -> str:
     flag = p.get("flag", "🏳️")
     country = escape(_trunc(p.get("country", "Unknown"), MAX_COUNTRY))
@@ -76,6 +99,12 @@ def format_message(p: dict) -> str:
     ping = int(p.get("ping", 0))
     pid = p.get("id", 0)
     proto_label = _proto_label(p)
+
+    # Если страна неизвестна и это WEB — пробуем определить по домену
+    if country == "Unknown" and p["protocol"].upper() == "WEB":
+        guessed_country, guessed_flag = guess_country_by_domain(p["ip"])
+        country = guessed_country
+        flag = guessed_flag
 
     flag_str = f"{flag} {country}"
 
@@ -92,9 +121,7 @@ def format_message(p: dict) -> str:
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  КЛАВИАТУРА
-# ═══════════════════════════════════════════════════════════════════════
+# ─── КЛАВИАТУРА ────────────────────────────────────────────────────────
 def build_keyboard(p: dict):
     link = build_connect_link(p)
     return InlineKeyboardMarkup(inline_keyboard=[[
