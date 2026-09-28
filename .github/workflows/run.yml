@@ -5,6 +5,12 @@ on:
   schedule:
     - cron: "*/30 * * * *"
 
+# ─── Запрет параллельных запусков ───
+# Без этого два запуска с разных IP убивают TG_SESSION.
+concurrency:
+  group: proxy-bot-run
+  cancel-in-progress: false   # новый ждёт, старый доигрывает
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -59,7 +65,7 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-          # LOG_LEVEL: DEBUG           # ← раскомментируйте для подробного лога
+          LOG_LEVEL: INFO              # ← INFO по умолчанию, DEBUG — для отладки
         run: python -u bot.py
 
       - name: State statistics
