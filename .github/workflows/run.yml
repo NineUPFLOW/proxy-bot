@@ -2,9 +2,7 @@ name: proxy-bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
-
+  
 concurrency:
   group: proxy-bot
   cancel-in-progress: false
