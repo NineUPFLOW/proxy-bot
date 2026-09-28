@@ -1,6 +1,7 @@
 """
 Сбор прокси из Telegram-источников с поддержкой тем (topics).
 Читает текст, подписи, кнопки и code-блоки.
+Добавлена расширенная поддержка WEB-прокси (все варианты ссылок).
 """
 
 import asyncio
@@ -18,7 +19,7 @@ from telethon.tl.types import MessageEntityCode, MessageEntityPre
 
 logger = logging.getLogger(__name__)
 
-# ─── ИСТОЧНИКИ ─────────────────────────────────────────────────────────
+# ─── ИСТОЧНИКИ (только рабочие, без мусорных) ──────────────────────────
 TELEGRAM_SOURCES = [
     "urlsources",
     "DESKVPN_RUSSIA",
@@ -54,6 +55,7 @@ TELEGRAM_SOURCES = [
     "whitetunnelru",
     "wildVF",
 ]
+
 MESSAGES_LIMIT = 200
 SOURCE_TIMEOUT = 30
 SOURCE_DELAY = 2
@@ -71,6 +73,17 @@ RE_TG_URL = re.compile(
     r"|tg://webproxy[^\s<>\"'\)\]]+|t\.me/webproxy[^\s<>\"'\)\]]+"
     r"|socks5://[^\s<>\"'\)\]]+|socks://[^\s<>\"'\)\]]+)"
 )
+
+# ─── Паттерн ссылок WEB-прокси (все варианты) ──────────────────────────
+RE_WEBPROXY_LINK = re.compile(
+    r"^(?:tg://webproxy\?|tg:webproxy\?"
+    r"|https?://(?:t\.me|telegram\.me|telegram\.dog)/webproxy\?)(.+)$",
+    re.IGNORECASE,
+)
+
+# ─── Строгая валидация домена и секрета ────────────────────────────────
+RE_VALID_DOMAIN = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+RE_VALID_WEB_SECRET = re.compile(r"^(?:dd)?[0-9a-f]{32}$")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -170,21 +183,74 @@ def _parse_tg_socks(line: str):
 
 
 def _parse_tg_webproxy(line: str):
+    """
+    Парсит tg://webproxy ссылки.
+    Поддерживает:
+      - tg://webproxy?server=...
+      - tg:webproxy?server=...
+      - t.me/webproxy?server=...
+      - telegram.me/webproxy?server=...
+      - telegram.dog/webproxy?server=...
+    """
     try:
-        params = _parse_qs_safe(urlparse(line).query)
-        server = params.get("server", [None])[0]
-        secret = params.get("secret", [None])[0]
-        if not all([server, secret]) or not secret.startswith("dd"):
+        # Нормализуем ссылку для urlparse
+        normalized = line.strip()
+        if normalized.startswith("tg:webproxy?"):
+            normalized = normalized.replace("tg:webproxy?", "tg://webproxy?", 1)
+        # Для telegram.me / telegram.dog urlparse тоже сработает
+
+        parsed = urlparse(normalized)
+        params = _parse_qs_safe(parsed.query)
+
+        server = (params.get("server", [None])[0] or "").strip()
+        secret = (params.get("secret", [None])[0] or "").strip().lower()
+
+        if not server or not secret:
             return None
-        port_raw = params.get("port", ["443"])[0]
-        try:
-            port = int(port_raw) if port_raw else 443
-        except ValueError:
-            port = 443
+
+        # ─── Порт: сначала server_port, потом port, потом 443 ───
+        server_port = 443
+        for key in ("server_port", "port"):
+            raw = params.get(key, [None])[0]
+            if raw:
+                try:
+                    p = int(raw)
+                    if 1 <= p <= 65535:
+                        server_port = p
+                        break
+                except ValueError:
+                    pass
+
+        # ─── Разбираем "host:port" внутри server ───
+        if ":" in server:
+            host_part, _, port_part = server.rpartition(":")
+            try:
+                maybe = int(port_part)
+                if 1 <= maybe <= 65535:
+                    server = host_part
+                    if server_port == 443:
+                        server_port = maybe
+            except ValueError:
+                pass
+
+        # ─── Валидация домена ───
+        if not RE_VALID_DOMAIN.match(server):
+            logger.debug("WEB: невалидный домен %r", server)
+            return None
+
+        # ─── Валидация secret (dd + 32 hex, dd опционально) ───
+        if not RE_VALID_WEB_SECRET.match(secret):
+            logger.debug("WEB: невалидный secret %r", secret)
+            return None
+
+        # ─── Приводим к dd-форме ───
+        if not secret.startswith("dd"):
+            secret = "dd" + secret
+
         return {
             "protocol": "WEB",
             "ip": server,
-            "port": port,
+            "port": server_port,
             "secret": secret,
             "raw": line,
         }
@@ -457,4 +523,4 @@ async def fetch_all_proxies() -> list:
 
     stats = Counter(p["protocol"] for p in result)
     logger.info("Всего собрано: %s | %s", len(result), dict(stats))
-    return result
+    return result 
