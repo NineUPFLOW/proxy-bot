@@ -2,11 +2,10 @@
 Оформление сообщений с прокси.
 Добавлена эвристика определения страны по домену для WEB-прокси.
 """
-
 from html import escape
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ─── НАСТРОЙКИ ОБРЕЗКИ ─────────────────────────────────────────────────
+# ─── НАСТРОЙКИ ОБРЕЗКИ ────────────────────────────────────────────────
 MAX_COUNTRY = 16
 MAX_CITY = 16
 MAX_PROVIDER = 22
@@ -20,7 +19,7 @@ def _trunc(value: str, max_len: int) -> str:
     return value[: max_len - 1].rstrip() + "…"
 
 
-# ─── ЭВРИСТИКА ПО TLD ──────────────────────────────────────────────────
+# ─── ЭВРИСТИКА ПО TLD ─────────────────────────────────────────────────
 _TLD_MAP = {
     ".ru": ("Russia", "🇷🇺"),
     ".de": ("Germany", "🇩🇪"),
@@ -47,40 +46,46 @@ _TLD_MAP = {
 def guess_country_by_domain(domain: str) -> tuple[str, str]:
     """Возвращает (country, flag) по TLD домена."""
     if not domain:
-        return ("Unknown", "🏳️")
+        return ("Unknown", "🏴")
+    domain_lower = domain.lower()
     for tld in sorted(_TLD_MAP.keys(), key=len, reverse=True):
-        if domain.endswith(tld):
+        if domain_lower.endswith(tld):
             return _TLD_MAP[tld]
-    return ("Unknown", "🏳️")
+    return ("Unknown", "🏴")
 
 
-# ─── ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ ────────────────────────────────────────────
+# ─── ССЫЛКА ДЛЯ ПОДКЛЮЧЕНИЯ ──────────────────────────────────────────
 def build_connect_link(p: dict) -> str:
     proto = p["protocol"].upper()
-    ip, port = p["ip"], p["port"]
+    ip = str(p.get("ip", "")).strip()
+    port = p.get("port")
+    secret = str(p.get("secret", "")).strip()
 
     if proto == "MTPROTO":
-        return f"tg://proxy?server={ip}&port={port}&secret={p['secret']}"
+        return f"tg://proxy?server={ip}&port={port}&secret={secret}"
     if proto == "SOCKS5":
         return f"tg://socks?server={ip}&port={port}"
     if proto == "WEB":
+        # Telegram принимает webproxy и с портом, и без.
+        # Если порт 443 — его можно опустить.
         if port and int(port) != 443:
-            return f"tg://webproxy?server={ip}&port={port}&secret={p['secret']}"
-        return f"tg://webproxy?server={ip}&secret={p['secret']}"
+            return f"tg://webproxy?server={ip}&port={port}&secret={secret}"
+        return f"tg://webproxy?server={ip}&secret={secret}"
     return ""
 
 
-# ─── ЛЕЙБЛ ПРОТОКОЛА ───────────────────────────────────────────────────
+# ─── ЛЕЙБЛ ПРОТОКОЛА ──────────────────────────────────────────────────
 def _proto_label(p: dict) -> str:
     proto = p["protocol"].upper()
     secret = p.get("secret", "")
     probe = p.get("probe_resistant", False)
+
     if proto == "MTPROTO":
         label = "MTProto"
         if secret.startswith("ee"):
             label += " · Fake TLS"
         if probe:
-            label += " · PROBE"
+            label += " · 🛡 PROBE"
         return label
     if proto == "WEB":
         return "WEB · TgWebProxy"
@@ -89,41 +94,64 @@ def _proto_label(p: dict) -> str:
     return proto
 
 
-# ─── ФОРМАТ СООБЩЕНИЯ ──────────────────────────────────────────────────
+# ─── ФОРМАТ СООБЩЕНИЯ ─────────────────────────────────────────────────
 def format_message(p: dict) -> str:
-    flag = p.get("flag", "🏳️")
-    country = escape(_trunc(p.get("country", "Unknown"), MAX_COUNTRY))
-    city = escape(_trunc(p.get("city", "Unknown"), MAX_CITY))
-    provider = escape(_trunc(p.get("provider", "Unknown"), MAX_PROVIDER))
-    ip_display = escape(_trunc(p.get("ip", ""), MAX_IP))
-    ping = int(p.get("ping", 0))
-    pid = p.get("id", 0)
-    proto_label = _proto_label(p)
+    # ─── Безопасное получение значений ───
+    country_raw = p.get("country", "Unknown")
+    city_raw = p.get("city", "Unknown")
+    provider_raw = p.get("provider", "Unknown")
+    ip_raw = p.get("ip", "")
+    ping_raw = p.get("ping", 0)
+    pid_raw = p.get("id", "?")
 
-    # Если страна неизвестна и это WEB — пробуем определить по домену
-    if country == "Unknown" and p["protocol"].upper() == "WEB":
-        guessed_country, guessed_flag = guess_country_by_domain(p["ip"])
-        country = guessed_country
+    # ─── Пинг: приводим к int безопасно ───
+    try:
+        ping = int(ping_raw)
+    except (TypeError, ValueError):
+        ping = 0
+
+    # ─── Эвристика для WEB: если страна Unknown — пробуем по домену ───
+    if country_raw == "Unknown" and p.get("protocol", "").upper() == "WEB":
+        guessed_country, guessed_flag = guess_country_by_domain(ip_raw)
+        country_raw = guessed_country
         flag = guessed_flag
+    else:
+        flag = p.get("flag", "🏴") or "🏴"
 
-    flag_str = f"{flag} {country}"
+    # ─── Экранирование HTML ───
+    country = escape(_trunc(country_raw, MAX_COUNTRY))
+    city = escape(_trunc(city_raw, MAX_CITY))
+    provider = escape(_trunc(provider_raw, MAX_PROVIDER))
+    ip_display = escape(_trunc(ip_raw, MAX_IP))
+    proto_label = escape(_proto_label(p))
+    pid = escape(str(pid_raw))
+
+    # ─── Заголовок: флаг + страна ───
+    flag_str = f"{flag} {country}".strip()
 
     return (
-        f"🔗 <b>#{pid}</b>  |  {flag_str}\n"
+        f"#{pid} | {flag_str}\n"
         f"\n"
-        f"┌ ✅ <b>Название:</b> {flag_str}\n"
-        f"├ 🔗 <b>Протокол:</b> {proto_label}\n"
-        f"├ 🌐 <b>Пинг:</b> {ping} ms\n"
-        f"├ 📍 <b>Страна:</b> {flag_str}\n"
-        f"├ 📍 <b>Город:</b> {city}\n"
-        f"├ 🏠 <b>Провайдер:</b> {provider}\n"
-        f"└ <b>IP:</b> <code>{ip_display}</code>"
+        f"┌ ✅ Название: {flag_str}\n"
+        f"├ 🔌 Протокол: {proto_label}\n"
+        f"├ ⚡ Пинг: {ping} ms\n"
+        f"├ 🌍 Страна: {country}\n"
+        f"├ 🏙 Город: {city}\n"
+        f"├ 🏢 Провайдер: {provider}\n"
+        f"└ 📡 IP: `{ip_display}`"
     )
 
 
-# ─── КЛАВИАТУРА ────────────────────────────────────────────────────────
+# ─── КЛАВИАТУРА ───────────────────────────────────────────────────────
 def build_keyboard(p: dict):
     link = build_connect_link(p)
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔑 Добавить proxy в Telegram", url=link)
-    ]])
+    if not link:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🔗 Добавить proxy в Telegram",
+                url=link,
+            )
+        ]]
+    )
