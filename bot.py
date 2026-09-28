@@ -18,8 +18,33 @@ from formatter import build_keyboard, format_message
 from sources import fetch_all_proxies
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", force=True)
-for name in ("telethon", "telethon.network", "telethon.client", "telethon.network.mtprotosender", "telethon.network.connection", "asyncio", "aiogram.event"):
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    force=True,
+)
+
+# ─── Подавление шума ───
+# CRITICAL для telethon: убирает "Unexpected exception in the receive loop"
+# (readexactly size can not be less than zero) при handshake с мёртвыми MTProxy.
+for name in (
+    "telethon",
+    "telethon.network",
+    "telethon.client",
+    "telethon.network.mtprotosender",
+    "telethon.network.connection",
+    "asyncio",
+    "aiogram.event",
+):
+    logging.getLogger(name).setLevel(logging.CRITICAL)
+
+# WARNING для telethon_webproxy: убирает ~500 строк INFO-логов на каждый WEB-чек
+# (Session bootstrapped / WebSocket-lanes carrier ready / Relay returned 503).
+for name in (
+    "telethon_webproxy",
+    "telethon_webproxy.carrier_base",
+    "telethon_webproxy.carrier_lanes",
+):
     logging.getLogger(name).setLevel(logging.WARNING)
 
 logger = logging.getLogger("proxy-bot")
@@ -185,10 +210,6 @@ async def run(bot: Bot) -> None:
 
     working: list[dict] = []
     for protocol, group in groups.items():
-        # IMPORTANT: do not use filter_unseen here. The old code checked only
-        # unseen entries, so a pool of 89 SOCKS5 proxies could degrade to 5
-        # candidates after state TTL/filtering. Every run now rechecks the best
-        # available sample up to MAX_*_CHECK.
         random.shuffle(group)
         fresh = group[:MAX_CHECK[protocol]]
         working.extend(await check_group(fresh, protocol))
