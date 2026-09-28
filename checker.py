@@ -5,6 +5,8 @@
 - Probe Resistance Test для MTProto с маской домена
 """
 import asyncio
+import base64
+import binascii
 import hashlib
 import ipaddress
 import logging
@@ -193,35 +195,58 @@ def _enrich(proxy: dict, ip: str, ping: int, geo: dict, probe_ok: bool) -> dict 
 # MTProto / WEB
 # ═══════════════════════════════════════════════════════════════════════
 
-def _normalize_secret(secret: str) -> str:
+_HEX = set("0123456789abcdef")
+
+
+def _decode_secret(s: str) -> bytes | None:
     """
-    Приводит секрет к форме, которую принимает Telethon.
-
-    - dd + 32 hex  → random-padded MTProxy. Отрезаем 'dd'.
-    - ee + 32 hex + domain (hex) → FakeTLS. Telethon 1.36 в
-      ConnectionTcpMTProxyRandomizedIntermediate его не умеет,
-      поэтому берём только ядро — первые 32 hex после 'ee'.
-      Прокси примет handshake, но маскировка под TLS потеряется.
-    - 32 hex без префикса → как есть.
-    - всё остальное → пустая строка (отсеется ValueError'ом).
+    Декодирует секрет MTProxy из hex или base64url.
+    Возвращает bytes длиной 16 или 17 (с dd/ee-префиксом) или None.
     """
-    if not secret:
-        return ""
-    s = secret.strip().lower()
+    if not s:
+        return None
+    s = s.strip()
 
-    if s.startswith("dd") and len(s) == 34:
-        return s[2:]
+    # 1) hex
+    s_low = s.lower()
+    if s_low and all(c in _HEX for c in s_low) and len(s_low) % 2 == 0:
+        try:
+            b = bytes.fromhex(s_low)
+            if len(b) in (16, 17):
+                return b
+        except ValueError:
+            pass
 
-    if s.startswith("ee"):
-        core = s[2:34]
-        if len(core) == 32 and all(c in "0123456789abcdef" for c in core):
-            return core
-        return ""
+    # 2) base64url (с добавлением паддинга)
+    try:
+        pad = (-len(s)) % 4
+        b = base64.urlsafe_b64decode(s + "=" * pad)
+        if len(b) in (16, 17):
+            return b
+    except (binascii.Error, ValueError):
+        pass
 
-    if len(s) == 32 and all(c in "0123456789abcdef" for c in s):
-        return s
+    return None
 
-    return ""
+
+def _normalize_secret(secret: str) -> str | None:
+    """
+    Приводит секрет к 32-символьному hex, который точно примет Telethon.
+
+    - 16-byte hex/base64           → 32 hex
+    - dd + 16-byte hex/base64      → 32 hex (dd отрезается)
+    - ee + 16-byte + domain (FakeTLS) → None (Telethon 1.36 не умеет)
+    - всё остальное                → None
+    """
+    b = _decode_secret(secret)
+    if b is None:
+        return None
+    if len(b) == 17:
+        if b[0] == 0xdd:
+            b = b[1:]
+        else:
+            return None
+    return b.hex()
 
 
 async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = False) -> int | None:
@@ -229,7 +254,10 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = F
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
     raw_secret = _normalize_secret(secret)
     if not raw_secret:
-        logger.info("mtproto skip %s:%s — invalid secret %r", ip, port, secret[:8] + "…")
+        logger.info(
+            "mtproto skip %s:%s — invalid secret %r",
+            ip, port, (secret[:10] + "…") if secret else "",
+        )
         return None
     try:
         client = TelegramClient(
@@ -293,7 +321,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# SOCKS5
+# SOCKS5 (только Telegram)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def check_socks5(proxy: dict) -> dict | None:
@@ -356,4 +384,4 @@ async def process_proxy(raw: dict) -> dict | None:
         return await check_mtproto(raw)
     if proto == "SOCKS5":
         return await check_socks5(raw)
-    return None
+    return None 
