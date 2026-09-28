@@ -47,10 +47,9 @@ jobs:
             proxy_state.db
             proxy_state.db-wal
             proxy_state.db-shm
-          key: proxy-state-v2-${{ github.run_number }}
+          key: proxy-v3-${{ github.run_number }}
           restore-keys: |
-            proxy-state-v2-
-            proxy-state-
+            proxy-v3-
 
       - name: Run bot
         env:
@@ -91,4 +90,4 @@ jobs:
             proxy_state.db
             proxy_state.db-wal
             proxy_state.db-shm
-          key: proxy-state-v2-${{ github.run_number }}
+          key: proxy-v3-${{ github.run_number }}
