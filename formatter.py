@@ -1,29 +1,36 @@
 """Telegram message formatting and deep links."""
 from __future__ import annotations
+
 from html import escape
 from urllib.parse import quote
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def _trunc(value: object, limit: int) -> str:
-    value = str(value or "").strip()
-    return value if len(value) <= limit else value[:limit - 1].rstrip() + "…"
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def build_connect_link(proxy: dict) -> str:
     proto = str(proxy.get("protocol", "")).upper()
     server = str(proxy.get("ip", "")).strip()
-    port = int(proxy.get("port", 0))
-    secret = str(proxy.get("secret", "")).strip()
-    if not server or not port:
+    try:
+        port = int(proxy.get("port", 0))
+    except (TypeError, ValueError):
         return ""
-    s = quote(server, safe=".-_[]:/")
+    secret = str(proxy.get("secret", "")).strip()
+    if not server or not 1 <= port <= 65535:
+        return ""
+
+    encoded_server = quote(server, safe=".-_[]:")
+    encoded_secret = quote(secret, safe="")
     if proto == "MTPROTO":
-        return f"tg://proxy?server={s}&port={port}&secret={quote(secret, safe='') }"
+        return f"tg://proxy?server={encoded_server}&port={port}&secret={encoded_secret}"
     if proto == "SOCKS5":
-        return f"tg://socks?server={s}&port={port}"
+        return f"tg://socks?server={encoded_server}&port={port}"
     if proto == "WEB":
-        return f"tg://webproxy?server={quote(server, safe='.-_[]:/')}&secret={quote(secret, safe='')}"
+        return f"tg://webproxy?server={encoded_server}&secret={encoded_secret}"
     return ""
 
 
@@ -33,9 +40,7 @@ def _label(proxy: dict) -> str:
     if proto == "MTPROTO":
         label = "MTProto"
         if secret.startswith("dd"):
-            label += " · Randomized"
-        if proxy.get("probe_resistant"):
-            label += " · 🛡 probe"
+            label += " · Random padding"
         return label
     if proto == "WEB":
         return "WEB Proxy"
@@ -66,10 +71,10 @@ def format_message(proxy: dict) -> str:
     )
 
 
-def build_keyboard(proxy: dict):
+def build_keyboard(proxy: dict) -> InlineKeyboardMarkup | None:
     link = build_connect_link(proxy)
     if not link:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text="🔗 Добавить proxy в Telegram", url=link
-    )]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🔗 Добавить proxy в Telegram", url=link)]]
+    )

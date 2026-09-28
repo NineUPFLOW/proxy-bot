@@ -18,8 +18,20 @@ from formatter import build_keyboard, format_message
 from sources import fetch_all_proxies
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", force=True)
-for name in ("telethon", "telethon.network", "telethon.client", "telethon.network.mtprotosender", "telethon.network.connection", "asyncio", "aiogram.event"):
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    force=True,
+)
+for name in (
+    "telethon",
+    "telethon.network",
+    "telethon.client",
+    "telethon.network.mtprotosender",
+    "telethon.network.connection",
+    "asyncio",
+    "aiogram.event",
+):
     logging.getLogger(name).setLevel(logging.WARNING)
 logger = logging.getLogger("proxy-bot")
 
@@ -30,24 +42,32 @@ def _required(name: str) -> str:
         raise RuntimeError(f"Missing environment variable: {name}")
     return value
 
+
 BOT_TOKEN = _required("BOT_TOKEN")
 CHAT_ID = int(_required("CHAT_ID"))
 TOPIC_ID = int(os.getenv("TOPIC_ID", "0") or 0) or None
-
-PUBLISH_COUNT = int(os.getenv("PUBLISH_COUNT", "9"))
-TARGETS = {"MTPROTO": int(os.getenv("TARGET_MT", "3")), "SOCKS5": int(os.getenv("TARGET_SOCKS5", "3")), "WEB": int(os.getenv("TARGET_WEB", "3"))}
+PUBLISH_COUNT = max(1, int(os.getenv("PUBLISH_COUNT", "9")))
+TARGETS = {
+    "MTPROTO": max(0, int(os.getenv("TARGET_MT", "3"))),
+    "SOCKS5": max(0, int(os.getenv("TARGET_SOCKS5", "3"))),
+    "WEB": max(0, int(os.getenv("TARGET_WEB", "3"))),
+}
 CONCURRENCY = max(1, int(os.getenv("CONCURRENCY", "15")))
-MAX_CHECK = {"MTPROTO": int(os.getenv("MAX_MT_CHECK", "500")), "SOCKS5": int(os.getenv("MAX_SOCKS5_CHECK", "200")), "WEB": int(os.getenv("MAX_WEB_CHECK", "100"))}
-SEND_DELAY = float(os.getenv("SEND_DELAY", "2.0"))
-MAX_SEND_RETRIES = int(os.getenv("MAX_SEND_RETRIES", "4"))
+MAX_CHECK = {
+    "MTPROTO": max(0, int(os.getenv("MAX_MT_CHECK", "500"))),
+    "SOCKS5": max(0, int(os.getenv("MAX_SOCKS5_CHECK", "200"))),
+    "WEB": max(0, int(os.getenv("MAX_WEB_CHECK", "100"))),
+}
+SEND_DELAY = max(0.0, float(os.getenv("SEND_DELAY", "2.0")))
+MAX_SEND_RETRIES = max(1, int(os.getenv("MAX_SEND_RETRIES", "4")))
 
 
 def dedup(proxies: list[dict]) -> list[dict]:
     best: dict[str, dict] = {}
-    for p in proxies:
-        key = state.proxy_identity(p)
-        if key not in best or int(p.get("score", 0)) > int(best[key].get("score", 0)):
-            best[key] = p
+    for proxy in proxies:
+        key = state.proxy_identity(proxy)
+        if key not in best or int(proxy.get("score", 0)) > int(best[key].get("score", 0)):
+            best[key] = proxy
     return list(best.values())
 
 
@@ -60,7 +80,9 @@ async def send_message(bot: Bot, text: str, *, proxy: dict | None = None) -> boo
             "link_preview_options": LinkPreviewOptions(is_disabled=True),
         }
         if proxy is not None:
-            kwargs["reply_markup"] = build_keyboard(proxy)
+            keyboard = build_keyboard(proxy)
+            if keyboard is not None:
+                kwargs["reply_markup"] = keyboard
         if TOPIC_ID is not None:
             kwargs["message_thread_id"] = TOPIC_ID
         try:
@@ -70,11 +92,16 @@ async def send_message(bot: Bot, text: str, *, proxy: dict | None = None) -> boo
             await asyncio.sleep(float(exc.retry_after) + 1)
         except TelegramAPIError as exc:
             if TOPIC_ID is not None and attempt == 1:
-                logger.warning("Topic send failed, retrying without TOPIC_ID: %s", exc)
+                logger.warning("Topic send failed; retrying without TOPIC_ID: %s", exc)
                 TOPIC_ID = None
+                continue
+            if attempt < MAX_SEND_RETRIES:
+                await asyncio.sleep(min(2**attempt, 10))
                 continue
             logger.error("Telegram send failed: %s", exc)
             return False
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Unexpected Telegram send error")
             return False
@@ -84,49 +111,56 @@ async def send_message(bot: Bot, text: str, *, proxy: dict | None = None) -> boo
 async def check_group(group: list[dict], name: str) -> list[dict]:
     if not group:
         return []
-    sem = asyncio.Semaphore(CONCURRENCY)
+    semaphore = asyncio.Semaphore(CONCURRENCY)
 
     async def one(proxy: dict):
-        async with sem:
+        async with semaphore:
             try:
                 return await process_proxy(proxy)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("Check failed for %s:%s", proxy.get("ip"), proxy.get("port"), exc_info=True)
+                logger.debug(
+                    "Check failed for %s:%s",
+                    proxy.get("ip"),
+                    proxy.get("port"),
+                    exc_info=True,
+                )
                 return None
 
     logger.info("Checking %s: %d candidates", name, len(group))
-    results = await asyncio.gather(*(one(p) for p in group), return_exceptions=False)
-    working = dedup([p for p in results if isinstance(p, dict)])
+    results = await asyncio.gather(*(one(proxy) for proxy in group))
+    working = dedup([proxy for proxy in results if isinstance(proxy, dict)])
     state.mark_seen_many(group)
     logger.info("%s: %d working", name, len(working))
     return working
 
 
 def select_proxies(working: list[dict]) -> list[dict]:
-    pools = {proto: [] for proto in TARGETS}
-    for p in working:
-        proto = str(p.get("protocol", "")).upper()
-        if proto in pools:
-            pools[proto].append(p)
-    for pool in pools.values():
-        pool.sort(key=lambda p: (-int(p.get("score", 0)), int(p.get("ping", 99999))))
+    pools = {protocol: [] for protocol in TARGETS}
+    for proxy in working:
+        protocol = str(proxy.get("protocol", "")).upper()
+        if protocol in pools:
+            pools[protocol].append(proxy)
 
-    selected = []
-    used = set()
-    for proto, target in TARGETS.items():
-        for p in pools[proto][:target]:
-            ident = state.proxy_identity(p)
-            if ident not in used:
-                selected.append(p); used.add(ident)
+    for pool in pools.values():
+        pool.sort(key=lambda proxy: (-int(proxy.get("score", 0)), int(proxy.get("ping", 99999))))
+
+    selected: list[dict] = []
+    used: set[str] = set()
+    for protocol, target in TARGETS.items():
+        for proxy in pools[protocol][:target]:
+            identity = state.proxy_identity(proxy)
+            if identity not in used:
+                selected.append(proxy)
+                used.add(identity)
 
     if len(selected) < PUBLISH_COUNT:
         remainder = sorted(
-            (p for p in working if state.proxy_identity(p) not in used),
-            key=lambda p: (-int(p.get("score", 0)), int(p.get("ping", 99999))),
+            (proxy for proxy in working if state.proxy_identity(proxy) not in used),
+            key=lambda proxy: (-int(proxy.get("score", 0)), int(proxy.get("ping", 99999))),
         )
-        selected.extend(remainder[:PUBLISH_COUNT - len(selected)])
+        selected.extend(remainder[: PUBLISH_COUNT - len(selected)])
     return selected[:PUBLISH_COUNT]
 
 
@@ -140,18 +174,18 @@ async def run(bot: Bot) -> None:
         await send_message(bot, "⚠️ Источники не вернули ни одного прокси.")
         return
 
-    groups = {proto: [] for proto in TARGETS}
-    for p in raw:
-        proto = str(p.get("protocol", "")).upper()
-        if proto in groups:
-            groups[proto].append(p)
-    logger.info("Collected: %s", {k: len(v) for k, v in groups.items()})
+    groups = {protocol: [] for protocol in TARGETS}
+    for proxy in raw:
+        protocol = str(proxy.get("protocol", "")).upper()
+        if protocol in groups:
+            groups[protocol].append(proxy)
+    logger.info("Collected: %s", {key: len(value) for key, value in groups.items()})
 
-    working = []
-    for proto, group in groups.items():
+    working: list[dict] = []
+    for protocol, group in groups.items():
         random.shuffle(group)
-        fresh = state.filter_unseen(group)[:MAX_CHECK[proto]]
-        working.extend(await check_group(fresh, proto))
+        fresh = state.filter_unseen(group)[: MAX_CHECK[protocol]]
+        working.extend(await check_group(fresh, protocol))
 
     working = state.filter_unpublished(dedup(working))
     if not working:
@@ -159,14 +193,18 @@ async def run(bot: Bot) -> None:
         return
 
     final = select_proxies(working)
-    logger.info("Selected: %s", {proto: sum(1 for p in final if p.get("protocol") == proto) for proto in TARGETS})
+    logger.info(
+        "Selected: %s",
+        {protocol: sum(1 for proxy in final if proxy.get("protocol") == protocol) for protocol in TARGETS},
+    )
 
     published = 0
     for proxy in final:
         if await send_message(bot, format_message(proxy), proxy=proxy):
             state.mark_published(proxy)
             published += 1
-        await asyncio.sleep(SEND_DELAY)
+        if SEND_DELAY:
+            await asyncio.sleep(SEND_DELAY)
     logger.info("Published %d/%d", published, len(final))
 
 
