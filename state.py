@@ -23,8 +23,14 @@ def proxy_identity(proxy: dict) -> str:
         port = int(proxy.get("port", 0))
     except (TypeError, ValueError):
         port = 0
-    secret = str(proxy.get("secret", "")).strip().lower() if protocol in {"MTPROTO", "WEB"} else ""
-    return f"{protocol}|{host}|{port}|{secret}"
+    if protocol in {"MTPROTO", "WEB"}:
+        tail = str(proxy.get("secret", "")).strip().lower()
+    elif protocol == "SOCKS5":
+        # Разные логины на одном host:port — это разные прокси.
+        tail = f"{proxy.get('user', '')}:{proxy.get('pass', '')}"
+    else:
+        tail = ""
+    return f"{protocol}|{host}|{port}|{tail}"
 
 
 def _hash(proxy: dict) -> str:
