@@ -42,7 +42,7 @@ jobs:
           python - <<'PY'
           import os
           required = ["BOT_TOKEN", "CHAT_ID", "API_ID", "API_HASH", "TG_SESSION"]
-          missing = [x for x in required if not os.getenv(x)]
+          missing = [name for name in required if not os.getenv(name)]
           if missing:
               raise SystemExit("Missing secrets: " + ", ".join(missing))
           try:
@@ -64,6 +64,35 @@ jobs:
       - name: Syntax check
         run: python -m compileall -q bot.py checker.py formatter.py sources.py state.py
 
+      - name: Import and smoke test
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          STATE_DB: smoke_state.db
+        run: |
+          python - <<'PY'
+          import os
+          import bot
+          import checker
+          import formatter
+          import sources
+          import state
+
+          sample = "tg://proxy?server=127.0.0.1&port=443&secret=0123456789abcdef0123456789abcdef"
+          parsed = sources.extract_from_text(sample)
+          assert len(parsed) == 1 and parsed[0]["protocol"] == "MTPROTO"
+          assert formatter.build_connect_link(parsed[0]).startswith("tg://proxy?")
+
+          state.init_db()
+          assert state.count_seen() == 0
+          assert state.count_published() == 0
+          print("Import and smoke test passed")
+          PY
+          rm -f smoke_state.db
+
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -81,15 +110,32 @@ jobs:
           if [ -f proxy_state.db ]; then
             python - <<'PY'
           import sqlite3
-          with sqlite3.connect("proxy_state.db") as db:
-              seen = db.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
-              published = db.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
-          print(f"seen={seen} published={published}")
+          from pathlib import Path
+
+          db_path = Path("proxy_state.db")
+          try:
+              with sqlite3.connect(db_path) as db:
+                  tables = {
+                      row[0]
+                      for row in db.execute(
+                          "SELECT name FROM sqlite_master WHERE type='table'"
+                      )
+                  }
+                  if {"seen_proxies", "published_proxies"} <= tables:
+                      seen = db.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
+                      published = db.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+                      print(f"seen={seen} published={published}")
+                  else:
+                      print("state database exists but schema is incomplete")
+          except sqlite3.Error as exc:
+              print(f"state statistics unavailable: {exc}")
           PY
+          else
+            echo "state database was not created"
           fi
 
       - name: Save state
-        if: always()
+        if: always() && hashFiles('proxy_state.db') != ''
         uses: actions/cache/save@v4
         with:
           path: proxy_state.db
