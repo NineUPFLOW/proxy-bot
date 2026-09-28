@@ -1,27 +1,19 @@
-# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 .pytest_cache/
-
-# Секреты и окружение
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
 .env
 *.env
-
-# Telegram-сессии
-session/
 *.session
 *.session-journal
-
-# Локальное состояние (не коммитим)
 proxy_state.db
 proxy_state.db-journal
 proxy_state.db-wal
 proxy_state.db-shm
 seen.json
-
-# IDE
 .vscode/
 .idea/
 *.swp
