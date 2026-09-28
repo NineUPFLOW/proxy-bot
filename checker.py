@@ -22,13 +22,25 @@ try:
 except ImportError:  # pragma: no cover
     ConnectionWebProxy = None
 
+# ─── Подавление шума от telethon при handshake ───
+# "Unexpected exception in the receive loop" / readexactly errors
+# появляются на каждой мёртвой MTProxy и не несут ценности.
+for name in (
+    "telethon",
+    "telethon.network",
+    "telethon.client",
+    "telethon.network.mtprotosender",
+    "telethon.network.connection",
+):
+    logging.getLogger(name).setLevel(logging.CRITICAL)
+
 logger = logging.getLogger(__name__)
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 CHECK_TIMEOUT = float(os.getenv("CHECK_TIMEOUT", "8"))
 WEB_CHECK_TIMEOUT = float(os.getenv("WEB_CHECK_TIMEOUT", "15"))
-SOCKS_CHECK_TIMEOUT = float(os.getenv("SOCKS_CHECK_TIMEOUT", "8"))
+SOCKS_CHECK_TIMEOUT = float(os.getenv("SOCKS_CHECK_TIMEOUT", "10"))
 MAX_PING_MS = int(os.getenv("MAX_PING_MS", "5000"))
 MAX_WEB_PING_MS = int(os.getenv("MAX_WEB_PING_MS", "10000"))
 MAX_GEO_CONCURRENCY = max(1, int(os.getenv("MAX_GEO_CONCURRENCY", "5")))
@@ -36,7 +48,6 @@ GEO_TIMEOUT = float(os.getenv("GEO_TIMEOUT", "5"))
 TEST_URL = os.getenv("SOCKS_TEST_URL", "https://api.telegram.org")
 HEADERS = {"User-Agent": "proxy-bot/2.1"}
 
-# Public geolocation is only used for display/filtering. Keep the list conservative.
 ALLOWED_COUNTRIES = {
     "RU", "BY", "KZ", "UA", "MD", "UZ", "KG", "TJ", "AM", "AZ", "GE",
     "DE", "NL", "FI", "SE", "NO", "DK", "EE", "LV", "LT", "IS", "PL",
@@ -105,8 +116,7 @@ def normalize_mt_secret(secret: str) -> str | None:
 
     Standard secrets are 16 bytes. dd-secrets are 17 bytes and must retain the
     dd prefix when used with ConnectionTcpMTProxyRandomizedIntermediate.
-    EE/Fake-TLS secrets are intentionally not checked by native Telethon: EE
-    is a separate TLS layer and requires a dedicated connector.
+    EE/Fake-TLS secrets are intentionally not checked by native Telethon.
     """
     raw = _decode_secret(secret)
     if raw is None:
@@ -220,8 +230,6 @@ async def _mt_attempt(host: str, port: int, secret: str) -> int | None:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        # Bad public proxies commonly return malformed/short MTProto packets.
-        # Treat those as a normal failed candidate instead of printing a traceback.
         logger.debug("MTProto check failed for %s:%s (%s)", host, port, type(exc).__name__)
         return None
     finally:
@@ -244,8 +252,7 @@ async def check_mtproto(proxy: dict) -> dict | None:
         return None
     secret = str(proxy.get("secret", ""))
     if secret.lower().startswith("ee"):
-        # Native Telethon 1.45 does not implement Fake-TLS/EE; do not publish a
-        # proxy that was only TCP-reachable but never completed a Telegram handshake.
+        # Native Telethon 1.45 does not implement Fake-TLS/EE.
         return None
     for attempt in range(2):
         ping = await _mt_attempt(ip, port, secret)
@@ -265,7 +272,6 @@ async def check_web(proxy: dict) -> dict | None:
     secret = str(proxy.get("secret", "")).strip()
     if not host or not secret:
         return None
-    # WEB Proxy v1 expects a plain/dd MTProto secret, not EE Fake-TLS.
     normalized = normalize_mt_secret(secret)
     if normalized is None:
         return None
@@ -323,7 +329,14 @@ async def check_socks5(proxy: dict) -> dict | None:
     ip = await resolve(host)
     if not ip:
         return None
-    connector = ProxyConnector(proxy_type=ProxyType.SOCKS5, host=host, port=port, rdns=True)
+    # Передаём уже разрезолвленный IP: некоторые публичные SOCKS5
+    # не поддерживают remote DNS (rdns), и запрос с доменом отваливается.
+    connector = ProxyConnector(
+        proxy_type=ProxyType.SOCKS5,
+        host=ip,
+        port=port,
+        rdns=False,
+    )
     started = asyncio.get_running_loop().time()
     try:
         timeout = aiohttp.ClientTimeout(total=SOCKS_CHECK_TIMEOUT)
@@ -334,7 +347,8 @@ async def check_socks5(proxy: dict) -> dict | None:
         ) as session:
             async with session.get(TEST_URL, timeout=timeout, allow_redirects=False) as response:
                 await response.read(64 * 1024)
-                if response.status >= 500:
+                # 4xx тоже означает "прокси не пропускает трафик" — отсеиваем.
+                if response.status >= 400:
                     return None
         ping = int((asyncio.get_running_loop().time() - started) * 1000)
         if ping > MAX_PING_MS:
@@ -347,7 +361,6 @@ async def check_socks5(proxy: dict) -> dict | None:
         logger.debug("SOCKS5 check failed for %s:%s (%s)", host, port, type(exc).__name__)
         return None
     finally:
-        # ClientSession owns this connector; close() is async in aiohttp.
         if not connector.closed:
             try:
                 await connector.close()
