@@ -1,33 +1,35 @@
-name: run
+name: proxy-bot
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "*/30 * * * *"
 
-# ─── Запрет параллельных запусков ───
-# Без этого два запуска с разных IP убивают TG_SESSION.
 concurrency:
-  group: proxy-bot-run
+  group: proxy-bot
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
+      - name: Setup Python
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Validate secrets
         env:
@@ -40,22 +42,27 @@ jobs:
           python - <<'PY'
           import os
           required = ["BOT_TOKEN", "CHAT_ID", "API_ID", "API_HASH", "TG_SESSION"]
-          missing = [name for name in required if not os.getenv(name)]
+          missing = [x for x in required if not os.getenv(x)]
           if missing:
-              raise SystemExit(f"❌ Missing secrets: {', '.join(missing)}")
-          print("✅ Secrets validation passed")
+              raise SystemExit("Missing secrets: " + ", ".join(missing))
+          try:
+              int(os.environ["CHAT_ID"])
+              int(os.environ["API_ID"])
+          except ValueError as exc:
+              raise SystemExit("CHAT_ID and API_ID must be integers") from exc
+          print("Secrets validation passed")
           PY
 
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
-          path: |
-            proxy_state.db
-            proxy_state.db-wal
-            proxy_state.db-shm
-          key: proxy-v3-${{ github.run_number }}
+          path: proxy_state.db
+          key: proxy-state-${{ github.run_id }}
           restore-keys: |
-            proxy-v3-
+            proxy-state-
+
+      - name: Syntax check
+        run: python -m compileall -q bot.py checker.py formatter.py sources.py state.py
 
       - name: Run bot
         env:
@@ -65,36 +72,25 @@ jobs:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-          LOG_LEVEL: DEBUG          # ← временно для диагностики MTProto
+          LOG_LEVEL: INFO
         run: python -u bot.py
 
       - name: State statistics
         if: always()
         run: |
           if [ -f proxy_state.db ]; then
-            echo "─── State statistics ───"
             python - <<'PY'
           import sqlite3
-          try:
-              conn = sqlite3.connect("proxy_state.db")
-              seen = conn.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
-              pub = conn.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
-              print(f" seen_proxies      : {seen}")
-              print(f" published_proxies : {pub}")
-              conn.close()
-          except Exception as e:
-              print(f" ⚠️ Failed to read DB: {e}")
+          with sqlite3.connect("proxy_state.db") as db:
+              seen = db.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
+              published = db.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
+          print(f"seen={seen} published={published}")
           PY
-          else
-            echo "⚠️ proxy_state.db is missing"
           fi
 
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: |
-            proxy_state.db
-            proxy_state.db-wal
-            proxy_state.db-shm
-          key: proxy-v3-${{ github.run_number }}
+          path: proxy_state.db
+          key: proxy-state-${{ github.run_id }}
