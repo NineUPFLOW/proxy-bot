@@ -238,7 +238,7 @@ def _normalize_secret(secret: str) -> str | None:
 
     - 16-byte hex/base64           → 32 hex
     - dd + 16-byte hex/base64      → 32 hex (dd отрезается)
-    - ee + 16-byte + domain (FakeTLS) → None (Telethon 1.36 не умеет)
+    - ee + 16-byte (FakeTLS)       → 32 hex (пробуем без маскировки)
     - всё остальное                → None
     """
     b = _decode_secret(secret)
@@ -246,6 +246,10 @@ def _normalize_secret(secret: str) -> str | None:
         return None
     if len(b) == 17:
         if b[0] == 0xdd:
+            b = b[1:]
+        elif b[0] == 0xee:
+            # FakeTLS: Telethon 1.36 не умеет, но handshake иногда проходит
+            # без маскировки — берём только ядро секрета (16 байт).
             b = b[1:]
         else:
             return None
@@ -257,7 +261,6 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = F
     timeout = WEB_CHECK_TIMEOUT if is_web else CHECK_TIMEOUT
     raw_secret = _normalize_secret(secret)
     if not raw_secret:
-        # DEBUG: подробности по каждому отсеянному прокси
         logger.debug(
             "mtproto skip %s:%s — invalid secret %r",
             ip, port, (secret[:10] + "…") if secret else "",
@@ -284,7 +287,6 @@ async def _one_mtproto_attempt(ip: str, port: int, secret: str, is_web: bool = F
     except (asyncio.TimeoutError, ConnectionError, OSError):
         return None
     except Exception as e:
-        # DEBUG: технические детали падений handshake
         logger.debug("mtproto attempt %s:%s — %s: %s", ip, port, type(e).__name__, e)
         return None
     finally:
