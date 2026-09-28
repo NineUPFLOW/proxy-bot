@@ -17,9 +17,7 @@ from telethon.tl.types import (
     MessageEntityPre,
 )
 
-
 logger = logging.getLogger(__name__)
-
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -27,7 +25,6 @@ TG_SESSION = os.environ.get(
     "TG_SESSION",
     "",
 )
-
 
 DEFAULT_SOURCES = """DESKVPN_RUSSIA
 FREEVPN444
@@ -62,7 +59,6 @@ vpn4everyone
 whitetunnelru
 wildVF"""
 
-
 TELEGRAM_SOURCES = [
     item.strip().lstrip("@")
     for item in os.getenv(
@@ -71,7 +67,6 @@ TELEGRAM_SOURCES = [
     ).splitlines()
     if item.strip()
 ]
-
 
 MESSAGES_LIMIT = max(
     1,
@@ -107,13 +102,13 @@ SOURCE_DELAY = float(
     )
 )
 
-
 RE_MARKDOWN = re.compile(
     r"\[[^\]]*\]\(([^)]+)\)"
 )
 
+# ИСПРАВЛЕНО: корректное регулярное выражение с группой захвата
 RE_HTML_HREF = re.compile(
-    r"""href=["']([^"']+)["']""",
+    r"""href=['"]([^'"]+)['"]""",
     re.I,
 )
 
@@ -132,14 +127,12 @@ RE_URL = re.compile(
     re.I | re.X,
 )
 
-
 def _clean_url(
     value: str,
 ) -> str:
     return value.strip().strip(
         "`<>\"'()[]{}.,;"
     )
-
 
 def _qs(
     url: str,
@@ -152,7 +145,6 @@ def _qs(
         ).items()
         if values
     }
-
 
 def _valid_port(
     value: object,
@@ -173,7 +165,6 @@ def _valid_port(
     ):
         return None
 
-
 def _valid_host(
     host: str,
 ) -> bool:
@@ -187,7 +178,6 @@ def _valid_host(
         and "/" not in host
         and "?" not in host
     )
-
 
 def _valid_secret(
     secret: str,
@@ -214,7 +204,6 @@ def _valid_secret(
         return True
 
     return False
-
 
 def analyze_secret(
     proxy: dict,
@@ -257,7 +246,6 @@ def analyze_secret(
             UnicodeDecodeError,
         ):
             pass
-
 
 def _parse_proxy(
     url: str,
@@ -406,7 +394,6 @@ def _parse_proxy(
 
     return None
 
-
 def _parse_bare_socks(
     token: str,
 ) -> dict | None:
@@ -440,7 +427,6 @@ def _parse_bare_socks(
             }
 
     return None
-
 
 def extract_from_text(
     text: str,
@@ -501,7 +487,6 @@ def extract_from_text(
             result.append(parsed)
 
     return result
-
 
 def extract_from_message(
     message,
@@ -596,7 +581,6 @@ def extract_from_message(
 
     return result
 
-
 def _dedup(
     proxies: list[dict],
 ) -> list[dict]:
@@ -647,7 +631,6 @@ def _dedup(
             result.append(proxy)
 
     return result
-
 
 async def _fetch_source_inner(
     client: TelegramClient,
@@ -721,7 +704,6 @@ async def _fetch_source_inner(
 
     return result
 
-
 async def _fetch_source(
     client: TelegramClient,
     source: str,
@@ -785,7 +767,6 @@ async def _fetch_source(
         )
 
     return []
-
 
 async def fetch_from_telegram_sources() -> list[dict]:
 
@@ -865,7 +846,6 @@ async def fetch_from_telegram_sources() -> list[dict]:
             pass
 
     return _dedup(result)
-
 
 async def fetch_all_proxies() -> list[dict]:
 
