@@ -329,12 +329,19 @@ async def check_socks5(proxy: dict) -> dict | None:
     ip = await resolve(host)
     if not ip:
         return None
-    # Передаём уже разрезолвленный IP: некоторые публичные SOCKS5
-    # не поддерживают remote DNS (rdns), и запрос с доменом отваливается.
+
+    # ─── Аутентификация, если прокси её требует ───
+    user = str(proxy.get("user", "") or "").strip() or None
+    password = str(proxy.get("pass", "") or "").strip() or None
+
+    # ─── Передаём уже разрезолвленный IP: многие публичные SOCKS5
+    # не поддерживают remote DNS, и запрос с доменом отваливается.
     connector = ProxyConnector(
         proxy_type=ProxyType.SOCKS5,
         host=ip,
         port=port,
+        username=user,
+        password=password,
         rdns=False,
     )
     started = asyncio.get_running_loop().time()
