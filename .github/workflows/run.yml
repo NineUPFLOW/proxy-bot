@@ -2,8 +2,8 @@ name: run
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
+  #schedule:
+   # - cron: "*/30 * * * *"
 
 # ─── Запрет параллельных запусков ───
 # Без этого два запуска с разных IP убивают TG_SESSION.
