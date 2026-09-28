@@ -74,21 +74,15 @@ RE_TG_URL = re.compile(
     r"|socks5://[^\s<>\"'\)\]]+|socks://[^\s<>\"'\)\]]+)"
 )
 
-# ─── Паттерн ссылок WEB-прокси (все варианты) ──────────────────────────
 RE_WEBPROXY_LINK = re.compile(
     r"^(?:tg://webproxy\?|tg:webproxy\?"
     r"|https?://(?:t\.me|telegram\.me|telegram\.dog)/webproxy\?)(.+)$",
     re.IGNORECASE,
 )
 
-# ─── Строгая валидация домена и секрета ────────────────────────────────
 RE_VALID_DOMAIN = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 RE_VALID_WEB_SECRET = re.compile(r"^(?:dd)?[0-9a-f]{32}$")
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  АНАЛИЗ SECRET
-# ═══════════════════════════════════════════════════════════════════════
 HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
@@ -206,7 +200,6 @@ def _parse_tg_webproxy(line: str):
         if not server or not secret:
             return None
 
-        # ─── Порт: сначала server_port, потом port, потом 443 ───
         server_port = 443
         for key in ("server_port", "port"):
             raw = params.get(key, [None])[0]
@@ -219,7 +212,6 @@ def _parse_tg_webproxy(line: str):
                 except ValueError:
                     pass
 
-        # ─── Разбираем "host:port" внутри server ───
         if ":" in server:
             host_part, _, port_part = server.rpartition(":")
             try:
@@ -231,17 +223,14 @@ def _parse_tg_webproxy(line: str):
             except ValueError:
                 pass
 
-        # ─── Валидация домена ───
         if not RE_VALID_DOMAIN.match(server):
             logger.debug("WEB: невалидный домен %r", server)
             return None
 
-        # ─── Валидация secret (dd + 32 hex, dd опционально) ───
         if not RE_VALID_WEB_SECRET.match(secret):
             logger.debug("WEB: невалидный secret %r", secret)
             return None
 
-        # Секрет сохраняем как есть — нормализация в checker.py
         return {
             "protocol": "WEB",
             "ip": server,
@@ -457,7 +446,6 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
         logger.warning("Таймаут при чтении @%s", source)
     except asyncio.CancelledError:
         logger.warning("Источник @%s отменён, пропускаем", source)
-        # не re-raise — иначе упадёт весь run
     except Exception as e:
         logger.warning("Ошибка чтения @%s: %s", source, e)
     return result
@@ -493,7 +481,23 @@ async def fetch_from_telegram_sources() -> list:
             logger.warning("TG_SESSION не авторизована")
             return []
 
+        consecutive_fails = 0
         for source in TELEGRAM_SOURCES:
+            # ─── Переподключение, если клиент отвалился ───
+            if not client.is_connected():
+                logger.info("Переподключение к Telegram (после отмены)...")
+                try:
+                    await client.connect()
+                    consecutive_fails = 0
+                except Exception as e:
+                    logger.warning("Не удалось переподключиться: %s", e)
+                    consecutive_fails += 1
+                    if consecutive_fails >= 3:
+                        logger.warning("3 подряд неудачных переподключения, прекращаем парсинг")
+                        break
+                    await asyncio.sleep(2)
+                    continue
+
             proxies = await _fetch_from_source(client, source)
             result.extend(proxies)
             await asyncio.sleep(SOURCE_DELAY)
