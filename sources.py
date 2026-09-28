@@ -193,11 +193,9 @@ def _parse_tg_webproxy(line: str):
       - telegram.dog/webproxy?server=...
     """
     try:
-        # Нормализуем ссылку для urlparse
         normalized = line.strip()
         if normalized.startswith("tg:webproxy?"):
             normalized = normalized.replace("tg:webproxy?", "tg://webproxy?", 1)
-        # Для telegram.me / telegram.dog urlparse тоже сработает
 
         parsed = urlparse(normalized)
         params = _parse_qs_safe(parsed.query)
@@ -243,8 +241,7 @@ def _parse_tg_webproxy(line: str):
             logger.debug("WEB: невалидный secret %r", secret)
             return None
 
-        # ─── ИСПРАВЛЕНО: секрет сохраняем как есть, без принудительного dd.
-        # Нормализацию выполняет checker.py перед передачей в Telethon.
+        # Секрет сохраняем как есть — нормализация в checker.py
         return {
             "protocol": "WEB",
             "ip": server,
@@ -406,13 +403,20 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
                     top_id = getattr(msg.reply_to, "reply_to_top_id", None)
                     if top_id:
                         thread_ids.add(top_id)
+        except asyncio.CancelledError:
+            logger.warning("Отмена при чтении thread_ids @%s", source)
+            raise
         except Exception as e:
             logger.debug("Не удалось собрать thread_ids: %s", e)
 
-        messages = await asyncio.wait_for(
-            client.get_messages(entity, limit=MESSAGES_LIMIT),
-            timeout=SOURCE_TIMEOUT,
-        )
+        try:
+            messages = await asyncio.wait_for(
+                client.get_messages(entity, limit=MESSAGES_LIMIT),
+                timeout=SOURCE_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            logger.warning("Отмена при чтении @%s, пропускаем источник", source)
+            return result
 
         for msg in messages:
             if msg is None:
@@ -435,6 +439,9 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
                         result.extend(_extract_proxies_from_message(msg))
                     except Exception as e:
                         logger.debug("skip thread msg: %s", e)
+            except asyncio.CancelledError:
+                logger.warning("Отмена при чтении темы @%s", source)
+                return result
             except Exception as e:
                 logger.debug("Ошибка чтения темы %s: %s", thread_id, e)
             await asyncio.sleep(0.5)
@@ -448,6 +455,9 @@ async def _fetch_from_source(client: TelegramClient, source: str) -> list:
         await asyncio.sleep(min(e.seconds, 60))
     except asyncio.TimeoutError:
         logger.warning("Таймаут при чтении @%s", source)
+    except asyncio.CancelledError:
+        logger.warning("Источник @%s отменён, пропускаем", source)
+        # не re-raise — иначе упадёт весь run
     except Exception as e:
         logger.warning("Ошибка чтения @%s: %s", source, e)
     return result
@@ -488,6 +498,8 @@ async def fetch_from_telegram_sources() -> list:
             result.extend(proxies)
             await asyncio.sleep(SOURCE_DELAY)
 
+    except asyncio.CancelledError:
+        logger.warning("Userbot-парсер отменён — продолжаем с тем что собрано")
     except Exception as e:
         logger.warning("Ошибка userbot-парсера: %s", e)
     finally:
