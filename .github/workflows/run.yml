@@ -2,9 +2,6 @@ name: run
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
-
 # ─── Запрет параллельных запусков ───
 concurrency:
   group: proxy-bot-run
