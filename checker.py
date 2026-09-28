@@ -19,7 +19,6 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.help import GetConfigRequest
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
-# ─── Уровень логирования через env ─────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 for name in (
