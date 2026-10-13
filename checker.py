@@ -135,6 +135,18 @@ def is_dd_secret(secret: str) -> bool:
     return secret_kind(secret) == "dd"
 
 
+def canonical_secret_hex(secret: str) -> str:
+    """Return the secret as lowercase hex, or "" when it cannot be decoded.
+
+    Telegram clients decode a link secret as base64url and reject the standard
+    base64 alphabet, so a secret containing '+', '/' or padding must be re-encoded
+    before it is published. Hex is decoded unambiguously (16 bytes, 17 starting
+    with 0xdd, or 21+ starting with 0xee) and is the canonical spelling.
+    """
+    raw = _decode_secret(secret)
+    return raw.hex() if raw is not None else ""
+
+
 def normalize_mt_secret(secret: str) -> str | None:
     """Return a secret accepted by Telethon's MTProxy connector.
 
@@ -324,9 +336,14 @@ async def check_web(proxy: dict) -> dict | None:
         ping = int((asyncio.get_running_loop().time() - started) * 1000)
         if ping > MAX_WEB_PING_MS:
             return None
-        ip = await resolve(host) or host
-        geo = await geolocate(ip) if ip and _is_ip(ip) else {}
-        return enrich(proxy, ip, ping, geo, False)
+        resolved = await resolve(host)
+        geo = await geolocate(resolved) if resolved and _is_ip(resolved) else {}
+        # A WEB proxy is a named relay: keep the hostname (the bridge capability
+        # is HMAC-bound to it) and only use the resolved IP for geolocation.
+        result = enrich(proxy, host, ping, geo, False)
+        if result is not None:
+            result["secret"] = canonical_secret_hex(secret) or secret
+        return result
     except asyncio.CancelledError:
         raise
     except Exception as exc:

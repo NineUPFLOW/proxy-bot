@@ -6,6 +6,8 @@ from urllib.parse import quote
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from checker import canonical_secret_hex
+
 
 def _trunc(value: object, limit: int) -> str:
     text = str(value or "").strip()
@@ -19,10 +21,13 @@ def build_connect_link(proxy: dict) -> str:
         port = int(proxy.get("port", 0))
     except (TypeError, ValueError):
         return ""
-    secret = str(proxy.get("secret", "")).strip()
+    raw_secret = str(proxy.get("secret", "")).strip()
     if not server or not 1 <= port <= 65535:
         return ""
     encoded_server = quote(server, safe=".-_[]:")
+    # Clients decode a link secret as base64url; re-encode to hex so a standard
+    # base64 spelling (with '+', '/' or padding) is still accepted.
+    secret = canonical_secret_hex(raw_secret) or raw_secret
     encoded_secret = quote(secret, safe="")
     if proto == "MTPROTO":
         return f"tg://proxy?server={encoded_server}&port={port}&secret={encoded_secret}"
@@ -36,7 +41,9 @@ def build_connect_link(proxy: dict) -> str:
             link += f"&pass={quote(password, safe='')}"
         return link
     if proto == "WEB":
-        return f"tg://webproxy?server={encoded_server}&port={port}&secret={encoded_secret}"
+        # HTTPS on port 443 is fixed by the WEB proxy type; the canonical link
+        # carries no port (the server field may be host or host/base-path).
+        return f"tg://webproxy?server={encoded_server}&secret={encoded_secret}"
     return ""
 
 

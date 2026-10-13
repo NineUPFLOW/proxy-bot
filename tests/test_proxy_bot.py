@@ -129,6 +129,62 @@ class SecretKindTests(unittest.TestCase):
         self.assertIsNone(checker.normalize_mt_secret(secret))
 
 
+class CanonicalSecretTests(unittest.TestCase):
+    def test_plain_hex_unchanged(self):
+        self.assertEqual(checker.canonical_secret_hex("ab" * 16), "ab" * 16)
+
+    def test_dd_hex_unchanged(self):
+        self.assertEqual(
+            checker.canonical_secret_hex("dd" + "ab" * 16), "dd" + "ab" * 16
+        )
+
+    def test_base64url_reecoded_to_hex(self):
+        raw = bytes(range(16))
+        b64 = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        self.assertEqual(checker.canonical_secret_hex(b64), raw.hex())
+
+    def test_standard_base64_reecoded_to_hex(self):
+        raw = bytes([0xFB, 0xFF] + list(range(14)))
+        std = base64.b64encode(raw).decode()
+        self.assertEqual(checker.canonical_secret_hex(std), raw.hex())
+
+    def test_invalid_returns_empty(self):
+        self.assertEqual(checker.canonical_secret_hex(""), "")
+
+
+class WebHostTests(unittest.TestCase):
+    def test_domain_accepted(self):
+        self.assertTrue(sources._valid_web_host("proxy.example.com"))
+
+    def test_ip_rejected(self):
+        self.assertFalse(sources._valid_web_host("203.0.113.7"))
+        self.assertFalse(sources._valid_web_host("127.0.0.1"))
+
+    def test_dotless_rejected(self):
+        self.assertFalse(sources._valid_web_host("localhost"))
+
+    def test_web_link_with_ip_host_is_not_collected(self):
+        link = "tg://webproxy?server=203.0.113.7&secret=dd" + "ab" * 16
+        self.assertEqual(sources.extract_from_text(link), [])
+
+    def test_web_link_with_domain_is_collected(self):
+        link = "tg://webproxy?server=proxy.example.com&secret=dd" + "ab" * 16
+        parsed = sources.extract_from_text(link)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["protocol"], "WEB")
+
+    def test_web_link_standard_base64_secret_canonicalized(self):
+        # Use a standard-base64 secret with a '+' and canonical base64url alphabet
+        # elsewhere so the URL form is unambiguous, and confirm it is stored as hex.
+        raw = bytes([0xFB, 0xEF] + list(range(14)))
+        std = base64.b64encode(raw).decode()
+        self.assertIn("+", std)
+        self.assertNotIn("/", std)
+        link = f"tg://webproxy?server=proxy.example.com&secret={std}"
+        parsed = sources.extract_from_text(link)
+        self.assertEqual(parsed[0]["secret"], raw.hex())
+
+
 class ScoreTests(unittest.TestCase):
     def test_mtproto_beats_web_and_socks(self):
         mt = checker.compute_score({"protocol": "MTPROTO", "ping": 100})
@@ -159,6 +215,45 @@ class FormatterTests(unittest.TestCase):
             }
         )
         self.assertTrue(link.startswith("tg://proxy?"))
+
+    def test_mtproto_link_canonicalizes_standard_base64_secret(self):
+        # A standard base64 spelling (with '+') must be re-encoded to hex so
+        # Telegram clients (which decode base64url) accept it.
+        raw = bytes([0xFB, 0xFF] + list(range(14)))
+        std_b64 = base64.b64encode(raw).decode()
+        self.assertIn("+", std_b64)
+        link = formatter.build_connect_link(
+            {"protocol": "MTPROTO", "ip": "1.2.3.4", "port": 443, "secret": std_b64}
+        )
+        self.assertIn(f"secret={raw.hex()}", link)
+
+    def test_web_link_has_no_port_and_canonical_secret(self):
+        link = formatter.build_connect_link(
+            {
+                "protocol": "WEB",
+                "ip": "proxy.example.com",
+                "port": 443,
+                "secret": "dd" + "ab" * 16,
+            }
+        )
+        # HTTPS/443 is fixed by the WEB proxy type: the canonical link has no port.
+        self.assertEqual(
+            link,
+            "tg://webproxy?server=proxy.example.com&secret=dd" + "ab" * 16,
+        )
+
+    def test_web_link_canonicalizes_standard_base64_secret(self):
+        raw = bytes([0xFB, 0xFF] + list(range(14)))
+        std_b64 = base64.b64encode(raw).decode()
+        link = formatter.build_connect_link(
+            {
+                "protocol": "WEB",
+                "ip": "proxy.example.com",
+                "port": 443,
+                "secret": std_b64,
+            }
+        )
+        self.assertIn(f"secret={raw.hex()}", link)
 
     def test_socks_link_includes_auth(self):
         link = formatter.build_connect_link(

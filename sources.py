@@ -9,12 +9,14 @@ import os
 import re
 from collections import Counter
 from contextlib import suppress
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageEntityCode, MessageEntityPre
+
+from checker import canonical_secret_hex
 
 logger = logging.getLogger(__name__)
 API_ID = int(os.environ["API_ID"])
@@ -81,8 +83,19 @@ def _clean_url(value: str) -> str:
 
 
 def _qs(url: str) -> dict[str, str]:
-    query = parse_qs(urlparse(url).query, keep_blank_values=True)
-    return {k: v[0] for k, v in query.items() if v}
+    """Parse the query string without form-decoding.
+
+    Telegram links are not form-encoded, so a literal ``+`` is part of a
+    standard-base64 secret and must not be turned into a space (which
+    ``urllib.parse.parse_qs`` would do).
+    """
+    query: dict[str, str] = {}
+    for pair in urlparse(url).query.split("&"):
+        if not pair:
+            continue
+        key, _, value = pair.partition("=")
+        query.setdefault(unquote(key), unquote(value))
+    return query
 
 
 def _valid_port(value: object) -> int | None:
@@ -96,6 +109,30 @@ def _valid_port(value: object) -> int | None:
 def _valid_host(host: str) -> bool:
     host = host.strip()
     return bool(host) and len(host) <= 253 and not any(c in host for c in " /?")
+
+
+# Один сегмент DNS-имени: начинается и заканчивается буквой/цифрой.
+RE_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
+
+
+def _valid_web_host(host: str) -> bool:
+    """WEB-релей — именованный хост.
+
+    Клиенты Telegram отвергают IP-адреса и адреса без точки в поле server
+    (WEB-прокси работает только по HTTPS/443 на реальном домене), поэтому такие
+    ссылки бесполезно собирать и публиковать.
+    """
+    h = host.strip().lower().rstrip(".")
+    if not h or len(h) > 253 or "." not in h or "/" in h:
+        return False
+    labels = h.split(".")
+    if not all(len(label) <= 63 and RE_HOST_LABEL.fullmatch(label) for label in labels):
+        return False
+    last = labels[-1]
+    hex_prefix = last.startswith("0x")
+    digits = last[2:] if hex_prefix else last
+    numeric = all(c.isdigit() or (hex_prefix and c in "abcdef") for c in digits)
+    return not (digits and numeric)
 
 
 def _valid_secret(secret: str) -> bool:
@@ -165,12 +202,12 @@ def _parse_proxy(url: str) -> dict | None:
             q = _qs(url)
             host = unquote(q.get("server", q.get("host", ""))).strip().lower()
             secret = unquote(q.get("secret", "")).strip()
-            if _valid_host(host) and _valid_secret(secret):
+            if _valid_web_host(host) and _valid_secret(secret):
                 return {
                     "protocol": "WEB",
                     "ip": host,
                     "port": 443,
-                    "secret": secret,
+                    "secret": canonical_secret_hex(secret) or secret,
                     "raw": url,
                 }
 
