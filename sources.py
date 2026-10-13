@@ -25,22 +25,21 @@ TG_SESSION = os.environ.get("TG_SESSION", "")
 
 DEFAULT_SOURCES = """DESKVPN_RUSSIA
 FREEVPN444
-File_vpn_2
 FluxVPNOff
 FreeSubVPN
 HalavaHappkeys
 Holost_Vpn
 KeyVless
 LowiKForum
+ProxyListFree
+ProxyMTProto
+ProxyTelegram
 RaViraNet
 Unblock_Tech
-VLESSdo
-VlESSdoo
 WSVPN_KEYS_chat
 bypassInterne
 forumYamVPN
 forumhappcluchi
-halyava_vpnx
 halyava_vpnz
 kfwlforum
 majetahapp
