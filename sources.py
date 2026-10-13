@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import re
 from collections import Counter
+from contextlib import suppress
 from urllib.parse import parse_qs, unquote, urlparse
 
 from telethon import TelegramClient
@@ -51,7 +54,11 @@ vpn4everyone
 whitetunnelru
 wildVF"""
 
-TELEGRAM_SOURCES = [x.strip().lstrip("@") for x in os.getenv("TELEGRAM_SOURCES", DEFAULT_SOURCES).splitlines() if x.strip()]
+TELEGRAM_SOURCES = [
+    x.strip().lstrip("@")
+    for x in os.getenv("TELEGRAM_SOURCES", DEFAULT_SOURCES).splitlines()
+    if x.strip()
+]
 MESSAGES_LIMIT = max(1, int(os.getenv("MESSAGES_LIMIT", "200")))
 THREAD_LIMIT = max(0, int(os.getenv("THREAD_LIMIT", "80")))
 SOURCE_TIMEOUT = float(os.getenv("SOURCE_TIMEOUT", "30"))
@@ -60,7 +67,9 @@ SOURCE_DELAY = float(os.getenv("SOURCE_DELAY", "1"))
 RE_MARKDOWN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 RE_HTML_HREF = re.compile(r"href=['\"]([^'\"]+)['\"]", re.I)
 RE_URL = re.compile(
-    r"(?:tg://(?:proxy|socks|webproxy)\?[^\s<>\"']+|(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:proxy|socks|webproxy)\?[^\s<>\"']+|socks5?://[^\s<>\"']+)",
+    r"(?:tg://(?:proxy|socks|webproxy)\?[^\s<>\"']+"
+    r"|(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:proxy|socks|webproxy)\?[^\s<>\"']+"
+    r"|socks5?://[^\s<>\"']+)",
     re.I,
 )
 # Строка явно про SOCKS — тогда из неё можно извлекать bare IP:port
@@ -72,7 +81,8 @@ def _clean_url(value: str) -> str:
 
 
 def _qs(url: str) -> dict[str, str]:
-    return {k: v[0] for k, v in parse_qs(urlparse(url).query, keep_blank_values=True).items() if v}
+    query = parse_qs(urlparse(url).query, keep_blank_values=True)
+    return {k: v[0] for k, v in query.items() if v}
 
 
 def _valid_port(value: object) -> int | None:
@@ -90,12 +100,19 @@ def _valid_host(host: str) -> bool:
 
 def _valid_secret(secret: str) -> bool:
     value = secret.strip()
+    if not value:
+        return False
     low = value.lower()
     if re.fullmatch(r"(?:dd|ee)[0-9a-f]{32,}", low):
-        return len(low) >= 34
+        return True
     if re.fullmatch(r"[0-9a-f]{32}", low):
         return True
-    return bool(re.fullmatch(r"[A-Za-z0-9_-]{22,24}", value))
+    # Base64 (with or without padding) that decodes to a 16/17-byte secret.
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (ValueError, binascii.Error):
+        return False
+    return len(decoded) in (16, 17)
 
 
 def analyze_secret(proxy: dict) -> None:
@@ -121,7 +138,13 @@ def _parse_proxy(url: str) -> dict | None:
             port = _valid_port(q.get("port"))
             secret = unquote(q.get("secret", "")).strip()
             if _valid_host(host) and port and _valid_secret(secret):
-                proxy = {"protocol": "MTPROTO", "ip": host, "port": port, "secret": secret, "raw": url}
+                proxy = {
+                    "protocol": "MTPROTO",
+                    "ip": host,
+                    "port": port,
+                    "secret": secret,
+                    "raw": url,
+                }
                 analyze_secret(proxy)
                 return proxy
 
@@ -143,7 +166,13 @@ def _parse_proxy(url: str) -> dict | None:
             host = unquote(q.get("server", q.get("host", ""))).strip().lower()
             secret = unquote(q.get("secret", "")).strip()
             if _valid_host(host) and _valid_secret(secret):
-                return {"protocol": "WEB", "ip": host, "port": 443, "secret": secret, "raw": url}
+                return {
+                    "protocol": "WEB",
+                    "ip": host,
+                    "port": 443,
+                    "secret": secret,
+                    "raw": url,
+                }
 
         if low.startswith(("socks5://", "socks://")):
             parsed = urlparse(url)
@@ -166,9 +195,12 @@ def _parse_bare_socks(token: str) -> dict | None:
     if token.count(":") != 1:
         return None
     host, port = token.rsplit(":", 1)
-    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host) and _valid_port(port):
-        if all(0 <= int(part) <= 255 for part in host.split(".")):
-            return {"protocol": "SOCKS5", "ip": host, "port": int(port), "raw": token}
+    if (
+        re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host)
+        and _valid_port(port)
+        and all(0 <= int(part) <= 255 for part in host.split("."))
+    ):
+        return {"protocol": "SOCKS5", "ip": host, "port": int(port), "raw": token}
     return None
 
 
@@ -207,7 +239,8 @@ def extract_from_message(message) -> list[dict]:
     for entity in getattr(message, "entities", None) or []:
         if isinstance(entity, (MessageEntityCode, MessageEntityPre)):
             try:
-                result.extend(extract_from_text(text[entity.offset:entity.offset + entity.length]))
+                chunk = text[entity.offset:entity.offset + entity.length]
+                result.extend(extract_from_text(chunk))
             except Exception:
                 logger.debug("Failed to parse message entity", exc_info=True)
     markup = getattr(message, "reply_markup", None)
@@ -264,7 +297,9 @@ async def _fetch_source_inner(client: TelegramClient, source: str) -> list[dict]
 
 async def _fetch_source(client: TelegramClient, source: str) -> list[dict]:
     try:
-        result = await asyncio.wait_for(_fetch_source_inner(client, source), SOURCE_TIMEOUT)
+        result = await asyncio.wait_for(
+            _fetch_source_inner(client, source), SOURCE_TIMEOUT
+        )
         result = _dedup(result)
         for proxy in result:
             proxy["source"] = source
@@ -274,7 +309,7 @@ async def _fetch_source(client: TelegramClient, source: str) -> list[dict]:
         delay = min(int(exc.seconds), 120)
         logger.warning("FloodWait @%s: sleeping %ss", source, delay)
         await asyncio.sleep(delay)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Source timed out @%s after %ss", source, SOURCE_TIMEOUT)
     except asyncio.CancelledError:
         raise
@@ -313,10 +348,8 @@ async def fetch_from_telegram_sources() -> list[dict]:
     except Exception:
         logger.exception("Telegram source collector failed")
     finally:
-        try:
+        with suppress(Exception):
             await client.disconnect()
-        except Exception:
-            pass
     return _dedup(result)
 
 

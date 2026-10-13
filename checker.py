@@ -9,7 +9,7 @@ import ipaddress
 import logging
 import os
 import socket
-from typing import Optional
+from contextlib import suppress
 
 import aiohttp
 from aiohttp_socks import ProxyConnector, ProxyType
@@ -56,7 +56,7 @@ ALLOWED_COUNTRIES = {
     "US", "CA", "JP", "KR", "SG", "HK",
 }
 
-_http_session: Optional[aiohttp.ClientSession] = None
+_http_session: aiohttp.ClientSession | None = None
 _geo_cache: dict[str, dict] = {}
 _geo_sem = asyncio.Semaphore(MAX_GEO_CONCURRENCY)
 
@@ -98,10 +98,9 @@ def _decode_secret(secret: str) -> bytes | None:
         return None
     low = value.lower()
     try:
-        if low.startswith(("dd", "ee")) and len(low) >= 34 and all(c in "0123456789abcdef" for c in low):
-            raw = bytes.fromhex(low)
-            return raw
-        if len(low) % 2 == 0 and all(c in "0123456789abcdef" for c in low):
+        if low.startswith(("dd", "ee")) and len(low) >= 34 and _is_hex(low):
+            return bytes.fromhex(low)
+        if len(low) % 2 == 0 and _is_hex(low):
             return bytes.fromhex(low)
     except ValueError:
         pass
@@ -111,18 +110,42 @@ def _decode_secret(secret: str) -> bytes | None:
         return None
 
 
+def _is_hex(value: str) -> bool:
+    return bool(value) and all(c in "0123456789abcdef" for c in value)
+
+
+def secret_kind(secret: str) -> str:
+    """Classify a decoded MTProto secret by its actual bytes.
+
+    Prefixes are decided from the decoded bytes, not the input string: a plain
+    16-byte secret whose first byte happens to be 0xdd/0xee is not a dd/Fake-TLS
+    secret.
+    """
+    raw = _decode_secret(secret)
+    if raw is None:
+        return "invalid"
+    if raw.startswith(b"\xee"):
+        return "fake_tls"
+    if raw.startswith(b"\xdd"):
+        return "dd"
+    return "plain"
+
+
+def is_dd_secret(secret: str) -> bool:
+    return secret_kind(secret) == "dd"
+
+
 def normalize_mt_secret(secret: str) -> str | None:
     """Return a secret accepted by Telethon's MTProxy connector.
 
-    Standard secrets are 16 bytes. dd-secrets are 17 bytes and must retain the
-    dd prefix when used with ConnectionTcpMTProxyRandomizedIntermediate.
-    EE/Fake-TLS secrets are intentionally not checked by native Telethon.
+    Plain secrets are 16 bytes. dd-secrets are 17 bytes and must retain the dd
+    prefix when used with ConnectionTcpMTProxyRandomizedIntermediate. EE/Fake-TLS
+    secrets are intentionally not checked by native Telethon.
     """
     raw = _decode_secret(secret)
     if raw is None:
         return None
-    low = str(secret).strip().lower()
-    if low.startswith("ee"):
+    if raw.startswith(b"\xee"):
         return None
     if raw.startswith(b"\xdd"):
         if len(raw) != 17:
@@ -162,7 +185,9 @@ async def geolocate(ip: str) -> dict:
         return {}
 
 
-def enrich(proxy: dict, ip: str, ping: int, geo: dict, probe: bool = False) -> dict | None:
+def enrich(
+    proxy: dict, ip: str, ping: int, geo: dict, probe: bool = False
+) -> dict | None:
     country_code = str(geo.get("countryCode", "")).upper()
     if country_code and country_code not in ALLOWED_COUNTRIES:
         return None
@@ -177,7 +202,11 @@ def enrich(proxy: dict, ip: str, ping: int, geo: dict, probe: bool = False) -> d
         "flag": _flag(country_code),
         "probe_resistant": bool(probe),
     })
-    raw_id = f"{result.get('protocol')}|{ip}|{result.get('port')}|{result.get('secret', '')}"
+    # Use the canonical decoded secret so hex and base64 spellings of the same
+    # secret produce the same id/identity downstream.
+    secret = _decode_secret(str(result.get("secret", "")))
+    canonical = secret.hex() if secret else str(result.get("secret", ""))
+    raw_id = f"{result.get('protocol')}|{ip}|{result.get('port')}|{canonical}"
     result["id"] = hashlib.sha256(raw_id.encode()).hexdigest()[:12]
     result["score"] = compute_score(result)
     return result
@@ -190,8 +219,7 @@ def compute_score(proxy: dict) -> int:
     except (TypeError, ValueError):
         ping = 99999
     score = {"MTPROTO": 10000, "WEB": 7000, "SOCKS5": 5000}.get(proto, 0)
-    secret = str(proxy.get("secret", "")).lower()
-    if proto == "MTPROTO" and secret.startswith("dd"):
+    if proto == "MTPROTO" and is_dd_secret(str(proxy.get("secret", ""))):
         score += 1500
     if proxy.get("probe_resistant"):
         score += 2000
@@ -230,13 +258,13 @@ async def _mt_attempt(host: str, port: int, secret: str) -> int | None:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.debug("MTProto check failed for %s:%s (%s)", host, port, type(exc).__name__)
+        logger.debug(
+            "MTProto check failed for %s:%s (%s)", host, port, type(exc).__name__
+        )
         return None
     finally:
-        try:
+        with suppress(Exception):
             await asyncio.wait_for(client.disconnect(), 2)
-        except Exception:
-            pass
 
 
 async def check_mtproto(proxy: dict) -> dict | None:
@@ -251,14 +279,14 @@ async def check_mtproto(proxy: dict) -> dict | None:
     if not ip:
         return None
     secret = str(proxy.get("secret", ""))
-    if secret.lower().startswith("ee"):
+    if secret_kind(secret) == "fake_tls":
         # Native Telethon 1.45 does not implement Fake-TLS/EE.
         return None
     for attempt in range(2):
         ping = await _mt_attempt(ip, port, secret)
         if ping is not None and ping <= MAX_PING_MS:
             geo = await geolocate(ip)
-            return enrich(proxy, ip, ping, geo, secret.lower().startswith("dd"))
+            return enrich(proxy, ip, ping, geo, is_dd_secret(secret))
         if attempt == 0:
             await asyncio.sleep(0.2)
     return None
@@ -277,10 +305,11 @@ async def check_web(proxy: dict) -> dict | None:
         return None
     if not normalized.startswith("dd"):
         normalized = "dd" + normalized
+    mode = os.getenv("WEB_PROXY_MODE", "websocket-lanes")
     client = TelegramClient(
         StringSession(""), API_ID, API_HASH,
         connection=ConnectionWebProxy,
-        proxy=(host, normalized, {"mode": os.getenv("WEB_PROXY_MODE", "websocket-lanes")}),
+        proxy=(host, normalized, {"mode": mode}),
         timeout=WEB_CHECK_TIMEOUT,
         connection_retries=0,
         retry_delay=0,
@@ -304,10 +333,8 @@ async def check_web(proxy: dict) -> dict | None:
         logger.debug("WEB proxy check failed for %s (%s)", host, type(exc).__name__)
         return None
     finally:
-        try:
+        with suppress(Exception):
             await asyncio.wait_for(client.disconnect(), 3)
-        except Exception:
-            pass
 
 
 def _is_ip(value: str) -> bool:
@@ -351,12 +378,13 @@ async def check_socks5(proxy: dict) -> dict | None:
             connector=connector,
             connector_owner=True,
             headers=HEADERS,
-        ) as session:
-            async with session.get(TEST_URL, timeout=timeout, allow_redirects=False) as response:
-                await response.read(64 * 1024)
-                # 4xx тоже означает "прокси не пропускает трафик" — отсеиваем.
-                if response.status >= 400:
-                    return None
+        ) as session, session.get(
+            TEST_URL, timeout=timeout, allow_redirects=False
+        ) as response:
+            await response.read(64 * 1024)
+            # 4xx тоже означает "прокси не пропускает трафик" — отсеиваем.
+            if response.status >= 400:
+                return None
         ping = int((asyncio.get_running_loop().time() - started) * 1000)
         if ping > MAX_PING_MS:
             return None
@@ -365,14 +393,14 @@ async def check_socks5(proxy: dict) -> dict | None:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.debug("SOCKS5 check failed for %s:%s (%s)", host, port, type(exc).__name__)
+        logger.debug(
+            "SOCKS5 check failed for %s:%s (%s)", host, port, type(exc).__name__
+        )
         return None
     finally:
         if not connector.closed:
-            try:
+            with suppress(Exception):
                 await connector.close()
-            except Exception:
-                pass
 
 
 async def process_proxy(proxy: dict) -> dict | None:
