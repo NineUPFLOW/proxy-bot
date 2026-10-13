@@ -80,7 +80,8 @@ def dedup(proxies: list[dict]) -> list[dict]:
     best: dict[str, dict] = {}
     for proxy in proxies:
         key = state.proxy_identity(proxy)
-        if key not in best or int(proxy.get("score", 0)) > int(best[key].get("score", 0)):
+        current = best.get(key)
+        if current is None or int(proxy.get("score", 0)) > int(current.get("score", 0)):
             best[key] = proxy
     return list(best.values())
 
@@ -135,7 +136,12 @@ async def check_group(group: list[dict], name: str) -> list[dict]:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.debug("Check failed for %s:%s (%s)", proxy.get("ip"), proxy.get("port"), type(exc).__name__)
+                logger.debug(
+                    "Check failed for %s:%s (%s)",
+                    proxy.get("ip"),
+                    proxy.get("port"),
+                    type(exc).__name__,
+                )
                 return None
 
     logger.info("Checking %s: %d candidates", name, len(group))
@@ -148,7 +154,9 @@ async def check_group(group: list[dict], name: str) -> list[dict]:
         source_groups.setdefault(str(proxy.get("source", "unknown")), []).append(proxy)
     for source, source_items in source_groups.items():
         source_ids = {state.proxy_identity(item) for item in source_items}
-        source_working = sum(1 for item in working if state.proxy_identity(item) in source_ids)
+        source_working = sum(
+            1 for item in working if state.proxy_identity(item) in source_ids
+        )
         state.record_source_stats(source, len(source_items), source_working)
 
     logger.info("%s: %d/%d working", name, len(working), len(group))
@@ -186,7 +194,10 @@ def select_proxies(working: list[dict]) -> list[dict]:
                 used.add(identity)
 
     if len(selected) < PUBLISH_COUNT:
-        remainder = sorted((p for p in working if state.proxy_identity(p) not in used), key=_sort_key)
+        remainder = sorted(
+            (p for p in working if state.proxy_identity(p) not in used),
+            key=_sort_key,
+        )
         selected.extend(remainder[:PUBLISH_COUNT - len(selected)])
     return selected[:PUBLISH_COUNT]
 
@@ -220,7 +231,8 @@ async def run(bot: Bot) -> None:
         return
 
     final = select_proxies(working)
-    logger.info("Selected: %s", {p: sum(1 for x in final if x.get("protocol") == p) for p in TARGETS})
+    counts = {p: sum(1 for x in final if x.get("protocol") == p) for p in TARGETS}
+    logger.info("Selected: %s", counts)
 
     published = 0
     for proxy in final:

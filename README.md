@@ -185,7 +185,9 @@ proxy-bot/
 ├── checker.py                  # Проверка + probe test
 ├── formatter.py                # Оформление сообщений
 ├── state.py                    # SQLite-состояние
+├── tests/                      # Юнит-тесты (python -m unittest discover -s tests -t .)
 ├── requirements.txt            # Зависимости
+├── LICENSE                     # MIT
 └── README.md
 ```
 

@@ -103,7 +103,9 @@ def _rows_to_hashes(proxies: list[dict]) -> list[tuple[dict, str]]:
     return out
 
 
-def _blocked_hashes(table: str, column: str, hashes: list[str], cutoff: float) -> set[str]:
+def _blocked_hashes(
+    table: str, column: str, hashes: list[str], cutoff: float
+) -> set[str]:
     if not hashes:
         return set()
     blocked: set[str] = set()
@@ -112,7 +114,8 @@ def _blocked_hashes(table: str, column: str, hashes: list[str], cutoff: float) -
             chunk = hashes[start:start + 900]
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
-                f"SELECT hash FROM {table} WHERE hash IN ({placeholders}) AND {column} > ?",
+                f"SELECT hash FROM {table} "
+                f"WHERE hash IN ({placeholders}) AND {column} > ?",
                 (*chunk, cutoff),
             )
             blocked.update(row[0] for row in rows)
@@ -122,7 +125,8 @@ def _blocked_hashes(table: str, column: str, hashes: list[str], cutoff: float) -
 def filter_unpublished(proxies: list[dict]) -> list[dict]:
     pairs = _rows_to_hashes(proxies)
     cutoff = time.time() - PUBLISHED_TTL
-    blocked = _blocked_hashes("published_proxies", "published_at", [h for _, h in pairs], cutoff)
+    hashes = [h for _, h in pairs]
+    blocked = _blocked_hashes("published_proxies", "published_at", hashes, cutoff)
     return [p for p, h in pairs if h not in blocked]
 
 
@@ -136,12 +140,16 @@ def mark_seen_many(proxies: list[dict]) -> None:
             port = int(proxy.get("port", 0))
         except (TypeError, ValueError):
             continue
-        rows.append((proxy_hash, _identity_digest(proxy), protocol, host, port, now, now))
+        rows.append(
+            (proxy_hash, _identity_digest(proxy), protocol, host, port, now, now)
+        )
     if not rows:
         return
     with _connect() as conn:
         conn.executemany("""
-        INSERT INTO seen_proxies(hash,identity,protocol,host,port,first_seen,last_seen,check_count)
+        INSERT INTO seen_proxies(
+          hash,identity,protocol,host,port,first_seen,last_seen,check_count
+        )
         VALUES (?,?,?,?,?,?,?,1)
         ON CONFLICT(hash) DO UPDATE SET
           last_seen=excluded.last_seen,
@@ -163,14 +171,22 @@ def mark_published(proxy: dict) -> None:
         port = 0
     ping = proxy.get("ping_ms", proxy.get("ping"))
     try:
-        ping = int(float(str(ping).replace("ms", "").strip())) if ping is not None else None
+        ping = (
+            int(float(str(ping).replace("ms", "").strip()))
+            if ping is not None
+            else None
+        )
     except (TypeError, ValueError):
         ping = None
     with _connect() as conn:
         conn.execute("""
-        INSERT INTO published_proxies(hash,identity,protocol,host,port,published_at,ping_ms)
+        INSERT INTO published_proxies(
+          hash,identity,protocol,host,port,published_at,ping_ms
+        )
         VALUES (?,?,?,?,?,?,?)
-        ON CONFLICT(hash) DO UPDATE SET published_at=excluded.published_at,ping_ms=excluded.ping_ms
+        ON CONFLICT(hash) DO UPDATE SET
+          published_at=excluded.published_at,
+          ping_ms=excluded.ping_ms
         """, (_hash(proxy), _identity_digest(proxy), protocol, host, port, now, ping))
 
 
@@ -181,7 +197,10 @@ def record_source_stats(source: str, fetched: int, working: int) -> None:
     with _connect() as conn:
         if working > 0:
             conn.execute("""
-            INSERT INTO source_stats(source,total_fetched,total_working,last_success,last_failure,consecutive_failures)
+            INSERT INTO source_stats(
+              source,total_fetched,total_working,last_success,
+              last_failure,consecutive_failures
+            )
             VALUES (?,?,?, ?,NULL,0)
             ON CONFLICT(source) DO UPDATE SET
               total_fetched=source_stats.total_fetched+excluded.total_fetched,
@@ -191,7 +210,9 @@ def record_source_stats(source: str, fetched: int, working: int) -> None:
             """, (source, fetched, working, now))
         else:
             conn.execute("""
-            INSERT INTO source_stats(source,total_fetched,total_working,last_failure,consecutive_failures)
+            INSERT INTO source_stats(
+              source,total_fetched,total_working,last_failure,consecutive_failures
+            )
             VALUES (?, ?, 0, ?, 1)
             ON CONFLICT(source) DO UPDATE SET
               total_fetched=source_stats.total_fetched+excluded.total_fetched,
@@ -203,9 +224,18 @@ def record_source_stats(source: str, fetched: int, working: int) -> None:
 def cleanup() -> None:
     now = time.time()
     with _connect() as conn:
-        conn.execute("DELETE FROM seen_proxies WHERE last_seen < ?", (now - SEEN_TTL,))
-        conn.execute("DELETE FROM published_proxies WHERE published_at < ?", (now - PUBLISHED_TTL,))
-        conn.execute("DELETE FROM source_stats WHERE last_success IS NOT NULL AND last_success < ?", (now - SOURCE_STATS_TTL,))
+        conn.execute(
+            "DELETE FROM seen_proxies WHERE last_seen < ?", (now - SEEN_TTL,)
+        )
+        conn.execute(
+            "DELETE FROM published_proxies WHERE published_at < ?",
+            (now - PUBLISHED_TTL,),
+        )
+        conn.execute(
+            "DELETE FROM source_stats "
+            "WHERE last_success IS NOT NULL AND last_success < ?",
+            (now - SOURCE_STATS_TTL,),
+        )
 
 
 def count_seen() -> int:

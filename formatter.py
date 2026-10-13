@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from html import escape
 from urllib.parse import quote
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -26,7 +27,14 @@ def build_connect_link(proxy: dict) -> str:
     if proto == "MTPROTO":
         return f"tg://proxy?server={encoded_server}&port={port}&secret={encoded_secret}"
     if proto == "SOCKS5":
-        return f"tg://socks?server={encoded_server}&port={port}"
+        link = f"tg://socks?server={encoded_server}&port={port}"
+        user = str(proxy.get("user", "") or "").strip()
+        password = str(proxy.get("pass", "") or "").strip()
+        if user:
+            link += f"&user={quote(user, safe='')}"
+        if password:
+            link += f"&pass={quote(password, safe='')}"
+        return link
     if proto == "WEB":
         return f"tg://webproxy?server={encoded_server}&port={port}&secret={encoded_secret}"
     return ""
@@ -70,4 +78,5 @@ def build_keyboard(proxy: dict) -> InlineKeyboardMarkup | None:
     link = build_connect_link(proxy)
     if not link:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Добавить proxy в Telegram", url=link)]])
+    button = InlineKeyboardButton(text="🔗 Добавить proxy в Telegram", url=link)
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
