@@ -1,0 +1,22 @@
+[Unit]
+Description=Check and publish Telegram proxies
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=proxybot
+Group=proxybot
+WorkingDirectory=/opt/proxy-bot
+EnvironmentFile=/etc/proxy-bot.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=STATE_DB=/var/lib/proxy-bot/proxy_state.db
+ExecStart=/opt/proxy-bot/.venv/bin/python /opt/proxy-bot/bot.py
+TimeoutStartSec=30min
+StateDirectory=proxy-bot
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

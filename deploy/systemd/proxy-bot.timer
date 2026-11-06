@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the proxy checker every 15 minutes
+
+[Timer]
+OnCalendar=*-*-* *:0/15:00
+Persistent=true
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

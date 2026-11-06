@@ -6,7 +6,7 @@ on:
       dry_run:
         description: Только проверить, без публикации и изменения состояния
         type: boolean
-        default: false
+        default: true
   schedule:
     - cron: '*/15 * * * *'
 
@@ -52,6 +52,8 @@ jobs:
           restore-keys: |
             proxy-state-${{ github.ref_name }}-
       - name: Check and publish
+        # Scheduled runs have no workflow_dispatch inputs and still publish.
+        # Manual dispatch defaults to dry-run unless the user unchecks it.
         run: |
           if [ '${{ inputs.dry_run }}' = 'true' ]; then
             python -u bot.py --dry-run

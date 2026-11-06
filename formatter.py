@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from proxy_utils import canonical_secret_hex, secret_kind
+from proxy_utils import canonical_secret_hex, secret_kind, valid_hostname
 
 
 def _trunc(value: object, limit: int) -> str:
@@ -16,14 +16,33 @@ def _trunc(value: object, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _port(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    try:
+        port = int(value)
+    except ValueError:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _nonnegative(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    try:
+        number = int(value)
+    except ValueError:
+        return None
+    return number if number >= 0 else None
+
+
 def build_connect_link(proxy: dict) -> str:
     proto = str(proxy.get("protocol", "")).upper()
     server = str(proxy.get("ip", "")).strip()
-    try:
-        port = int(proxy.get("port", 0))
-    except (TypeError, ValueError):
+    port = _port(proxy.get("port"))
+    if not port or not valid_hostname(server, domain_only=proto == "WEB"):
         return ""
-    if not server or not 1 <= port <= 65535:
+    if proto == "WEB" and port != 443:
         return ""
     encoded_server = quote(server, safe=".-_[]:")
     if proto == "SOCKS5":
@@ -66,28 +85,45 @@ def _format_date(value: object) -> str:
 
 
 def format_message(proxy: dict) -> str:
-    pid = escape(str(proxy.get("id", "?")))
-    host = escape(_trunc(proxy.get("ip", ""), 100))
-    try:
-        ping = max(0, int(proxy.get("ping", 0)))
-        successes = int(proxy.get("check_successes", 0))
-        total = int(proxy.get("check_total", 0))
-    except (TypeError, ValueError):
-        ping, successes, total = 0, 0, 0
+    """Render the check result without inventing missing measurements."""
+    host = _trunc(proxy.get("ip", ""), 253) or "не указан"
+    port = _port(proxy.get("port"))
+    address = f"{host}:{port}" if port else host
+    ping = _nonnegative(proxy.get("ping"))
+    successes = _nonnegative(proxy.get("check_successes"))
+    total = _nonnegative(proxy.get("check_total"))
+    confirmed = _nonnegative(proxy.get("confirmation_ping_ms"))
+    ping_label = f"{ping} ms (медиана)" if ping is not None else "неизвестно"
+    check_label = (
+        f"{successes}/{total}"
+        if successes is not None and total and successes <= total
+        else "неизвестно"
+    )
     country = str(proxy.get("check_country", "")).upper()
     if len(country) != 2 or not country.isascii() or not country.isalpha():
         country = "не определена"
     lines = [
-        f"<b>#{pid} · {escape(_label(proxy))}</b>",
-        f"<b>📡 Сервер:</b> <code>{host}:{int(proxy.get('port', 0))}</code>",
-        f"<b>⚡ Время ответа:</b> {ping} ms (медиана)",
-        f"<b>🔬 Успешных проверок:</b> {successes}/{total} + перед публикацией",
-        f"<b>🧭 Точка проверки:</b> {escape(country)} (оценка по внешнему IP)",
-        f"<b>🕒 Последняя проверка:</b> {escape(_format_date(proxy.get('checked_at')))}",
+        f"<b>🔹 {escape(_label(proxy))}</b>",
+        f"<b>📡 Сервер:</b> <code>{escape(address)}</code>",
+        "",
+        "<b>Проверка соединения</b>",
+        f"<b>⚡ Время ответа:</b> {ping_label}",
+        f"<b>🔬 Успешных проверок:</b> {check_label}",
     ]
+    if confirmed is not None:
+        lines.append(f"<b>✓ Финальная перепроверка:</b> {confirmed} ms")
+    lines.extend(
+        [
+            f"<b>🧭 Точка проверки:</b> {escape(country)} (оценка по внешнему IP)",
+            f"<b>🕒 Последняя проверка:</b> {escape(_format_date(proxy.get('checked_at')))}",
+        ]
+    )
     server_country = _trunc(proxy.get("country", ""), 30)
     if server_country:
         lines.append(f"<b>🌍 Страна сервера:</b> {escape(server_country)}")
+    pid = _trunc(proxy.get("id", ""), 40)
+    if pid:
+        lines.append(f"\n<b>ID:</b> <code>{escape(pid)}</code>")
     lines.append("\nДоступность зависит от сети и может измениться.")
     return "\n".join(lines)
 

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import audit_sources
 import checker
@@ -349,7 +349,7 @@ class AuditCLITests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch.object(sys, "argv", ["audit_sources.py", "--require-ru"]),
-            patch.object(audit_sources, "audit", return_value="sentinel"),
+            patch.object(audit_sources, "audit", new=Mock(return_value="sentinel")),
             patch.object(audit_sources.asyncio, "run", return_value=report),
             contextlib.redirect_stdout(output),
         ):
@@ -365,7 +365,9 @@ class AuditCLITests(unittest.TestCase):
             with self.subTest(flag=flag):
                 with (
                     patch.object(sys, "argv", ["audit_sources.py", flag]),
-                    patch.object(audit_sources, "audit", return_value="sentinel"),
+                    patch.object(
+                        audit_sources, "audit", new=Mock(return_value="sentinel")
+                    ),
                     patch.object(audit_sources.asyncio, "run", return_value=report),
                     contextlib.redirect_stdout(io.StringIO()),
                 ):

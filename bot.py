@@ -96,6 +96,9 @@ def sample_fair(proxies: list[dict], limit: int) -> list[dict]:
     for bucket in buckets.values():
         random.shuffle(bucket)
         queues.append(deque(bucket))
+    # When the limit is smaller than the number of sources, a fixed bucket
+    # order would permanently starve sources at the end of the configuration.
+    random.shuffle(queues)
     selected = []
     while queues and len(selected) < limit:
         remaining = []
