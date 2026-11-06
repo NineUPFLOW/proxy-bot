@@ -24,6 +24,141 @@
       "name": "speedx-socks5",
       "format": "socks5",
       "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
+    },
+    {
+      "name": "tg-proxy-net-catalog",
+      "format": "links",
+      "url": "https://tg-proxy.net/wp-json/tgprox/v1/catalog"
+    },
+    {
+      "name": "mtproxy-fyi",
+      "format": "links",
+      "url": "https://mtproxy.fyi/"
+    },
+    {
+      "name": "tgproxy-fyi",
+      "format": "links",
+      "url": "https://tgproxy.fyi/"
+    },
+    {
+      "name": "proksi-tg-top",
+      "format": "links",
+      "url": "https://proksi-tg.top/"
+    },
+    {
+      "name": "proxy-tg-bond",
+      "format": "links",
+      "url": "https://proxy-tg.bond/"
+    },
+    {
+      "name": "proxytg-bond",
+      "format": "links",
+      "url": "https://proxytg.bond/"
+    },
+    {
+      "name": "mtproto-date",
+      "format": "links",
+      "url": "https://mtproto.date/"
+    },
+    {
+      "name": "mtprotoserver-bond",
+      "format": "links",
+      "url": "https://mtprotoserver.bond/"
+    },
+    {
+      "name": "mtprotoproxy-sbs",
+      "format": "links",
+      "url": "https://mtprotoproxy.sbs/"
+    },
+    {
+      "name": "mtprotolist-bond",
+      "format": "links",
+      "url": "https://mtprotolist.bond/"
+    },
+    {
+      "name": "proxytelegram-bond",
+      "format": "links",
+      "url": "https://proxytelegram.bond/"
+    },
+    {
+      "name": "freemtproto-bond",
+      "format": "links",
+      "url": "https://freemtproto.bond/"
+    },
+    {
+      "name": "mtpro-xyz",
+      "format": "links",
+      "url": "https://mtpro.xyz/"
+    },
+    {
+      "name": "shablin-mtproto",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/shablin/mtproto-proxy/main/data/valid_proxy.txt"
+    },
+    {
+      "name": "kort-mtproto",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/proxy_all.txt"
+    },
+    {
+      "name": "solispirit-mirror",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt"
+    },
+    {
+      "name": "proxydaiv-mtproto",
+      "format": "mtproto",
+      "url": "https://raw.githubusercontent.com/McDaived/ProxyDaiv/main/public/proxies.json"
+    },
+    {
+      "name": "surya-mtproto",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/suryadev-sm/free-mtproto-proxy-list/main/proxies.txt"
+    },
+    {
+      "name": "ru2026-mtproto",
+      "format": "mtproto",
+      "url": "https://raw.githubusercontent.com/Chumbayoumba/free-telegram-proxy-russia-2026/main/proxies.txt"
+    },
+    {
+      "name": "telegavpn-web",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/TelegaVPN/free-vpn-keys/main/sub/v2raytun/all.txt"
+    },
+    {
+      "name": "proxyscrape-socks5",
+      "format": "socks5",
+      "url": "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&protocol=socks5"
+    },
+    {
+      "name": "proxyscrape-mirror",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main/proxies/protocols/socks5/data.txt"
+    },
+    {
+      "name": "dinoz0rg-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/dinoz0rg/proxy-list/main/checked_proxies/socks5.txt"
+    },
+    {
+      "name": "proxmint-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt"
+    },
+    {
+      "name": "monosans-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+    },
+    {
+      "name": "proxio-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/proxio-io/proxy-list/main/socks5.txt"
+    },
+    {
+      "name": "hookzof-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
     }
   ]
 }

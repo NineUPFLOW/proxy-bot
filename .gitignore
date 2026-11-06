@@ -33,6 +33,7 @@ seen.json
 *.tmp
 *.log
 
-# Optional local sources can contain access credentials or private proxy keys.
+# Optional local sources and diagnostic reports should not be committed by accident.
 sources.local.json
 custom-proxies.txt
+source-audit.json

@@ -11,6 +11,8 @@ import os
 import re
 import socket
 from collections import Counter
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -162,6 +164,51 @@ def _parse_bare_socks(token: str) -> dict | None:
     return {"protocol": "SOCKS5", "ip": host, "port": port} if port else None
 
 
+def _parse_mtproto_fields(host: object, port: object, secret: object) -> dict | None:
+    """Build an MTProto candidate with the same validation as a Telegram link.
+
+    This only parses syntax. Public IPv4 resolution is still enforced by the
+    checker before making a connection, including for structured JSON records.
+    """
+    if not isinstance(host, str) or not isinstance(secret, str):
+        return None
+    if isinstance(port, bool) or not isinstance(port, (str, int)):
+        return None
+    host = host.strip().strip("[]").rstrip(".").lower()
+    parsed_port = _valid_port(port)
+    canonical = canonical_secret_hex(secret.strip())
+    if not _valid_host(host) or not parsed_port or not canonical:
+        return None
+    proxy = {
+        "protocol": "MTPROTO",
+        "ip": host,
+        "port": parsed_port,
+        "secret": canonical,
+    }
+    analyze_secret(proxy)
+    return proxy
+
+
+def _parse_bare_mtproto(line: str) -> dict | None:
+    # The format is intentionally IPv4/domain only; an arbitrary IP:port line
+    # must never be silently treated as MTProto or SOCKS5.
+    line = line.partition("#")[0].strip()
+    parts = line.split(":")
+    if len(parts) != 3:
+        return None
+    return _parse_mtproto_fields(parts[0], parts[1], parts[2])
+
+
+def _parse_mtproto_object(item: dict) -> dict | None:
+    # Only consume separate JSON fields in a source explicitly declared mtproto.
+    # An explicit different protocol/type must not be reinterpreted as MTProto.
+    for key in ("protocol", "type"):
+        if key in item and str(item[key]).lower() not in {"mtproto", "mtproxy"}:
+            return None
+    host = item.get("server", item.get("host", item.get("ip")))
+    return _parse_mtproto_fields(host, item.get("port"), item.get("secret"))
+
+
 def _dedup(proxies: list[dict]) -> list[dict]:
     seen: set[str] = set()
     result = []
@@ -176,12 +223,15 @@ def _dedup(proxies: list[dict]) -> list[dict]:
 def extract_from_text(text: str, *, default_protocol: str = "") -> list[dict]:
     """Extract links from TXT, HTML, Markdown or string values in JSON.
 
-    Bare IP:port is interpreted as SOCKS5 only for a declared SOCKS5 feed, or
-    on a line that explicitly mentions SOCKS; it is not inferred elsewhere.
+    Bare IPv4:port is SOCKS5 only in a declared SOCKS5 feed or on a line that
+    explicitly mentions SOCKS. Bare host:port:secret and separate JSON fields
+    are interpreted as MTProto only for a declared MTProto feed.
     """
     if not text:
         return []
+    declared = default_protocol.upper()
     texts = [html.unescape(text)]
+    structured: list[dict] = []
     if text.lstrip().startswith(("{", "[")):
         try:
             stack = [json.loads(text)]
@@ -190,6 +240,8 @@ def extract_from_text(text: str, *, default_protocol: str = "") -> list[dict]:
                 if isinstance(item, str):
                     texts.append(html.unescape(item))
                 elif isinstance(item, dict):
+                    if declared == "MTPROTO" and (proxy := _parse_mtproto_object(item)):
+                        structured.append(proxy)
                     stack.extend(item.values())
                 elif isinstance(item, list):
                     stack.extend(item)
@@ -201,10 +253,13 @@ def extract_from_text(text: str, *, default_protocol: str = "") -> list[dict]:
         candidates.extend(m.group(1) for m in RE_HTML_HREF.finditer(value))
         candidates.extend(m.group(0) for m in RE_URL.finditer(value))
         for line in value.splitlines():
-            if default_protocol.upper() == "SOCKS5" or RE_SOCKS_CONTEXT.search(line):
+            if declared == "MTPROTO" and (proxy := _parse_bare_mtproto(line)):
+                structured.append(proxy)
+            if declared == "SOCKS5" or RE_SOCKS_CONTEXT.search(line):
                 candidates.extend(m.group(1) for m in RE_BARE_SOCKS.finditer(line))
     return _dedup(
-        [
+        structured
+        + [
             proxy
             for token in candidates
             if (proxy := (_parse_proxy(token) or _parse_bare_socks(token)))
@@ -238,7 +293,7 @@ def load_sources(path: Path | None = None) -> list[dict]:
             raise ValueError(
                 "Source names must be unique and contain only letters, digits, . _ -"
             )
-        if fmt not in {"links", "socks5"} or bool(url) == bool(file_path):
+        if fmt not in {"links", "socks5", "mtproto"} or bool(url) == bool(file_path):
             raise ValueError(
                 f"Source {name}: set format and exactly one of url or path"
             )
@@ -268,7 +323,26 @@ def _read_local(path: Path) -> bytes:
     return data
 
 
-async def _download(session: aiohttp.ClientSession, url: str) -> bytes:
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _http_date(value: str | None) -> str | None:
+    """Return a parsed server-provided date; never mistake it for proxy freshness."""
+    if not value:
+        return None
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+        return date.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return None
+
+
+async def _download(
+    session: aiohttp.ClientSession, url: str, *, metadata: dict | None = None
+) -> bytes:
     for _ in range(4):
         if not safe_https_url(url, forbid_telegram=True):
             raise ValueError("unsafe or Telegram source URL")
@@ -280,11 +354,21 @@ async def _download(session: aiohttp.ClientSession, url: str) -> bytes:
                 url = urljoin(url, location)
                 continue
             response.raise_for_status()
-            return await read_limited(response, MAX_SOURCE_BYTES)
+            data = await read_limited(response, MAX_SOURCE_BYTES)
+            if metadata is not None:
+                metadata["last_modified"] = _http_date(
+                    response.headers.get("Last-Modified")
+                )
+            return data
     raise ValueError("too many redirects")
 
 
-async def fetch_all_proxies(path: Path | None = None) -> list[dict]:
+async def fetch_source_results(path: Path | None = None) -> list[dict]:
+    """Fetch each configured source once; retain separate counts for audits.
+
+    Candidate details are internal. Consumers publishing reports must remove
+    the proxies list: it can contain secrets and source-specific credentials.
+    """
     config = load_sources(path)
     semaphore = asyncio.Semaphore(SOURCE_CONCURRENCY)
     connector = aiohttp.TCPConnector(
@@ -297,36 +381,64 @@ async def fetch_all_proxies(path: Path | None = None) -> list[dict]:
         headers={"User-Agent": "Mozilla/5.0 proxy-bot/3.0"},
     ) as session:
 
-        async def fetch_one(source: dict) -> list[dict]:
+        async def fetch_one(source: dict) -> dict:
+            report = {
+                "name": source["name"],
+                "status": "error",
+                "retrieved_at": None,
+                "last_modified": None,
+                "candidate_counts": {},
+                "proxies": [],
+            }
             async with semaphore:
                 try:
                     if source["path"]:
                         data = await asyncio.to_thread(_read_local, source["path"])
+                        try:
+                            report["last_modified"] = (
+                                datetime.fromtimestamp(
+                                    source["path"].stat().st_mtime, timezone.utc
+                                )
+                                .replace(microsecond=0)
+                                .isoformat()
+                            )
+                        except (OSError, OverflowError, ValueError):
+                            pass
                     else:
-                        data = await _download(session, source["url"])
+                        data = await _download(session, source["url"], metadata=report)
                     proxies = extract_from_text(
                         data.decode("utf-8-sig", errors="replace"),
-                        default_protocol="SOCKS5"
-                        if source["format"] == "socks5"
-                        else "",
+                        default_protocol=source["format"].upper(),
                     )[:MAX_PER_SOURCE]
                     for proxy in proxies:
                         proxy["source"] = source["name"]
+                    report["status"] = "candidates" if proxies else "empty"
+                    report["retrieved_at"] = _utc_now()
+                    report["candidate_counts"] = dict(
+                        Counter(p["protocol"] for p in proxies)
+                    )
+                    report["proxies"] = proxies
                     logger.info(
                         "Source %s: %d candidates", source["name"], len(proxies)
                     )
-                    return proxies
                 except asyncio.CancelledError:
                     raise
                 except (aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
-                    # Do not log URLs: local configuration may contain API keys.
+                    # Never log the URL, path or exception message: these may contain keys.
+                    report["error_type"] = type(exc).__name__
+                    if isinstance(exc, aiohttp.ClientResponseError):
+                        report["http_status"] = exc.status
                     logger.warning(
                         "Source %s failed (%s)", source["name"], type(exc).__name__
                     )
-                    return []
+                return report
 
-        results = await asyncio.gather(*(fetch_one(source) for source in config))
-    proxies = _dedup([proxy for result in results for proxy in result])
+        return await asyncio.gather(*(fetch_one(source) for source in config))
+
+
+async def fetch_all_proxies(path: Path | None = None) -> list[dict]:
+    results = await fetch_source_results(path)
+    proxies = _dedup([proxy for result in results for proxy in result["proxies"]])
     stats = Counter(p["protocol"] for p in proxies)
     logger.info("Collected %d unique candidates: %s", len(proxies), dict(stats))
     return proxies

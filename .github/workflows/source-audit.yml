@@ -1,0 +1,53 @@
+name: Аудит источников
+
+on:
+  workflow_dispatch:
+    inputs:
+      strict_ru:
+        description: Требовать стабильный исходящий IPv4 в России
+        type: boolean
+        default: true
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-bot-source-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    # Do not schedule GitHub-hosted runners as if they were in Russia.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.PROXY_RUNNER_LABELS != '' }}
+    runs-on: ${{ fromJSON(vars.PROXY_RUNNER_LABELS || '"ubuntu-latest"') }}
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      SOURCES_FILE: ${{ vars.SOURCES_FILE || 'sources.json' }}
+      AUDIT_REQUIRE_RU: ${{ github.event_name == 'schedule' || inputs.strict_ru }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Fetch feeds and sample-check proxies without publication
+        shell: bash
+        run: |
+          args=(--sample-per-source 2 --fail-if-empty --fail-if-no-working)
+          if [ "$AUDIT_REQUIRE_RU" = 'true' ]; then
+            args+=(--require-ru)
+          fi
+          python -u audit_sources.py "${args[@]}" > source-audit.json
+      - name: Upload aggregate report (no proxy secrets)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-audit-${{ github.run_id }}
+          path: source-audit.json
+          if-no-files-found: ignore
+          retention-days: 7
