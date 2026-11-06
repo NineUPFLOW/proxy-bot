@@ -1,5 +1,7 @@
 aiogram==3.31.0
 aiohttp>=3.13,<4
 aiohttp-socks==0.12.0
-Telethon==1.45.0
+python-socks[asyncio]>=2.4.3,<4
 telethon-webproxy==0.1.6
+# Pinned MIT-licensed primitives for MTProto / FakeTLS handshakes (no account required).
+mtproxy-checker @ git+https://github.com/alimghmi/mtproxychecker.git@80224c93c47242575107c83eb603d675e49226e8

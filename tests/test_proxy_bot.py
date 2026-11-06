@@ -4,35 +4,26 @@ Run from the repository root:
 
     python -m unittest discover -s tests -t . -v
 
-Only stdlib dependencies are required; network access is never used.
+Install requirements first; the tests do not require credentials or external network access.
 """
+
 from __future__ import annotations
 
 import base64
 import contextlib
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-# Modules read credentials at import time; provide harmless placeholders.
-os.environ.setdefault("API_ID", "1")
-os.environ.setdefault("API_HASH", "test")
-os.environ.setdefault("BOT_TOKEN", "123456:TEST")
-os.environ.setdefault("CHAT_ID", "-1000000000000")
+import checker
+import formatter
+import sources
+import state
 
 _TMP_DIR = tempfile.mkdtemp(prefix="proxy-bot-tests-")
 _TMP_DB = Path(_TMP_DIR) / "state.db"
-os.environ["STATE_DB"] = str(_TMP_DB)
-
-import checker  # noqa: E402
-import formatter  # noqa: E402
-import sources  # noqa: E402
-import state  # noqa: E402
 
 
 def tearDownModule() -> None:
@@ -98,9 +89,7 @@ class ValidSecretTests(unittest.TestCase):
         self.assertTrue(sources._valid_secret("dd" + "ab" * 16))
 
     def test_base64_16_bytes(self):
-        self.assertTrue(
-            sources._valid_secret(base64.b64encode(bytes(16)).decode())
-        )
+        self.assertTrue(sources._valid_secret(base64.b64encode(bytes(16)).decode()))
 
     def test_too_short_base64_rejected(self):
         self.assertFalse(sources._valid_secret("short"))
@@ -114,8 +103,12 @@ class SecretKindTests(unittest.TestCase):
     def test_plain_secret_starting_with_dd_byte_is_not_dd(self):
         # 16-byte secret whose first byte is 0xdd is not a 17-byte dd secret.
         secret = "dd" + "11" * 15
-        self.assertEqual(checker.secret_kind(secret), "dd")
-        self.assertIsNone(checker.normalize_mt_secret(secret))
+        self.assertEqual(checker.secret_kind(secret), "plain")
+        self.assertEqual(checker.normalize_mt_secret(secret), secret)
+
+    def test_plain_secret_starting_with_ee_byte_is_not_faketls(self):
+        secret = "ee" + "11" * 15
+        self.assertEqual(checker.secret_kind(secret), "plain")
 
     def test_real_dd_secret(self):
         secret = "dd" + "11" * 16
@@ -124,7 +117,7 @@ class SecretKindTests(unittest.TestCase):
         self.assertEqual(checker.normalize_mt_secret(secret), secret)
 
     def test_fake_tls_secret(self):
-        secret = "ee" + "33" * 16 + "0a6578616d706c652e636f6d"
+        secret = "ee" + "33" * 16 + "6578616d706c652e636f6d"
         self.assertEqual(checker.secret_kind(secret), "fake_tls")
         self.assertIsNone(checker.normalize_mt_secret(secret))
 
@@ -306,6 +299,9 @@ class FormatterTests(unittest.TestCase):
 
 class StateTests(unittest.TestCase):
     def setUp(self):
+        db_patch = patch.object(state, "DB_PATH", _TMP_DB)
+        db_patch.start()
+        self.addCleanup(db_patch.stop)
         state.init_db()
         with state._connect() as conn:
             conn.execute("DELETE FROM seen_proxies")

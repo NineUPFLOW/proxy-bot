@@ -1,17 +1,19 @@
-"""Telegram message formatting and deep links."""
+"""Telegram messages and connection links. Never confuse server and check location."""
+
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from html import escape
 from urllib.parse import quote
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from checker import canonical_secret_hex
+from proxy_utils import canonical_secret_hex, secret_kind
 
 
 def _trunc(value: object, limit: int) -> str:
     text = str(value or "").strip()
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def build_connect_link(proxy: dict) -> str:
@@ -21,69 +23,81 @@ def build_connect_link(proxy: dict) -> str:
         port = int(proxy.get("port", 0))
     except (TypeError, ValueError):
         return ""
-    raw_secret = str(proxy.get("secret", "")).strip()
     if not server or not 1 <= port <= 65535:
         return ""
     encoded_server = quote(server, safe=".-_[]:")
-    # Clients decode a link secret as base64url; re-encode to hex so a standard
-    # base64 spelling (with '+', '/' or padding) is still accepted.
-    secret = canonical_secret_hex(raw_secret) or raw_secret
-    encoded_secret = quote(secret, safe="")
-    if proto == "MTPROTO":
-        return f"tg://proxy?server={encoded_server}&port={port}&secret={encoded_secret}"
     if proto == "SOCKS5":
         link = f"tg://socks?server={encoded_server}&port={port}"
-        user = str(proxy.get("user", "") or "").strip()
-        password = str(proxy.get("pass", "") or "").strip()
+        user = str(proxy.get("user", "") or "")
+        password = str(proxy.get("pass", "") or "")
         if user:
             link += f"&user={quote(user, safe='')}"
         if password:
             link += f"&pass={quote(password, safe='')}"
         return link
-    if proto == "WEB":
-        # HTTPS on port 443 is fixed by the WEB proxy type; the canonical link
-        # carries no port (the server field may be host or host/base-path).
-        return f"tg://webproxy?server={encoded_server}&secret={encoded_secret}"
+    secret = canonical_secret_hex(str(proxy.get("secret", "")))
+    if not secret:
+        return ""
+    if proto == "MTPROTO":
+        return f"tg://proxy?server={encoded_server}&port={port}&secret={secret}"
+    if proto == "WEB" and secret_kind(secret) in {"plain", "dd"}:
+        return f"tg://webproxy?server={encoded_server}&secret={secret}"
     return ""
 
 
 def _label(proxy: dict) -> str:
     proto = str(proxy.get("protocol", "")).upper()
-    secret = str(proxy.get("secret", "")).lower()
     if proto == "MTPROTO":
-        return "MTProto · Random padding" if secret.startswith("dd") else "MTProto"
-    if proto == "WEB":
-        return "WEB Proxy"
-    if proto == "SOCKS5":
-        return "SOCKS5"
-    return proto or "Unknown"
+        kind = secret_kind(str(proxy.get("secret", "")))
+        return {"fake_tls": "MTProto · Fake TLS", "dd": "MTProto · Random padding"}.get(
+            kind, "MTProto"
+        )
+    return {"WEB": "WEB Proxy", "SOCKS5": "SOCKS5"}.get(proto, proto or "Unknown")
+
+
+def _format_date(value: object) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            return "неизвестно"
+        return parsed.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M:%S UTC")
+    except ValueError:
+        return "неизвестно"
 
 
 def format_message(proxy: dict) -> str:
-    country = _trunc(proxy.get("country", "Unknown"), 20)
-    city = _trunc(proxy.get("city", "Unknown"), 20)
-    provider = _trunc(proxy.get("provider", "Unknown"), 24)
-    host = _trunc(proxy.get("ip", ""), 64)
-    flag = str(proxy.get("flag", "🏴") or "🏴")
-    try:
-        ping = int(proxy.get("ping", 0))
-    except (TypeError, ValueError):
-        ping = 0
     pid = escape(str(proxy.get("id", "?")))
-    return (
-        f"<b>#{pid}</b> · {escape(flag)} {escape(country)}\n\n"
-        f"<b>🔌 Протокол:</b> {escape(_label(proxy))}\n"
-        f"<b>⚡ Пинг:</b> {ping} ms\n"
-        f"<b>🌍 Страна:</b> {escape(country)}\n"
-        f"<b>🏙 Город:</b> {escape(city)}\n"
-        f"<b>🏢 Провайдер:</b> {escape(provider)}\n"
-        f"<b>📡 Сервер:</b> <code>{escape(host)}</code>"
-    )
+    host = escape(_trunc(proxy.get("ip", ""), 100))
+    try:
+        ping = max(0, int(proxy.get("ping", 0)))
+        successes = int(proxy.get("check_successes", 0))
+        total = int(proxy.get("check_total", 0))
+    except (TypeError, ValueError):
+        ping, successes, total = 0, 0, 0
+    country = str(proxy.get("check_country", "")).upper()
+    if len(country) != 2 or not country.isascii() or not country.isalpha():
+        country = "не определена"
+    lines = [
+        f"<b>#{pid} · {escape(_label(proxy))}</b>",
+        f"<b>📡 Сервер:</b> <code>{host}:{int(proxy.get('port', 0))}</code>",
+        f"<b>⚡ Время ответа:</b> {ping} ms (медиана)",
+        f"<b>🔬 Успешных проверок:</b> {successes}/{total} + перед публикацией",
+        f"<b>🧭 Точка проверки:</b> {escape(country)} (оценка по внешнему IP)",
+        f"<b>🕒 Последняя проверка:</b> {escape(_format_date(proxy.get('checked_at')))}",
+    ]
+    server_country = _trunc(proxy.get("country", ""), 30)
+    if server_country:
+        lines.append(f"<b>🌍 Страна сервера:</b> {escape(server_country)}")
+    lines.append("\nДоступность зависит от сети и может измениться.")
+    return "\n".join(lines)
 
 
 def build_keyboard(proxy: dict) -> InlineKeyboardMarkup | None:
     link = build_connect_link(proxy)
     if not link:
         return None
-    button = InlineKeyboardButton(text="🔗 Добавить proxy в Telegram", url=link)
-    return InlineKeyboardMarkup(inline_keyboard=[[button]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Добавить прокси в Telegram", url=link)]
+        ]
+    )

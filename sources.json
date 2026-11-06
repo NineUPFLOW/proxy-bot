@@ -1,0 +1,29 @@
+{
+  "sources": [
+    {
+      "name": "ru-web-api",
+      "format": "links",
+      "url": "https://vnespiska.win/api/proxies-ru.json"
+    },
+    {
+      "name": "web-catalog",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/ryazhapov/tg-proxy-list/main/proxy.txt"
+    },
+    {
+      "name": "mtproto-catalog",
+      "format": "links",
+      "url": "https://raw.githubusercontent.com/ALIILAPRO/MTProtoProxy/main/mtproto.txt"
+    },
+    {
+      "name": "proxifly-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"
+    },
+    {
+      "name": "speedx-socks5",
+      "format": "socks5",
+      "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
+    }
+  ]
+}

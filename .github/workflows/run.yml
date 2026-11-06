@@ -1,158 +1,66 @@
-name: run
+name: Проверка и публикация прокси
 
 on:
   workflow_dispatch:
-# ─── Запрет параллельных запусков ───
-# Без этого два запуска с разных IP убивают TG_SESSION.
+    inputs:
+      dry_run:
+        description: Только проверить, без публикации и изменения состояния
+        type: boolean
+        default: false
+  schedule:
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: read
+
 concurrency:
-  group: proxy-bot-run
+  group: proxy-bot-run-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
+  publish:
+    # Do not schedule unconfigured GitHub-hosted runners outside Russia.
+    # Manual runs still work, but the strict country guard fails closed.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.PROXY_RUNNER_LABELS != '' }}
+    runs-on: ${{ fromJSON(vars.PROXY_RUNNER_LABELS || '"ubuntu-latest"') }}
     timeout-minutes: 30
-
     env:
-      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONDONTWRITEBYTECODE: '1'
+      REQUIRE_RU_CHECK: ${{ vars.REQUIRE_RU_CHECK || '1' }}
+      SOURCES_FILE: ${{ vars.SOURCES_FILE || 'sources.json' }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }}
+      TOPIC_ID: ${{ secrets.TOPIC_ID }}
+      BOT_PROXY_URL: ${{ secrets.BOT_PROXY_URL }}
 
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: '3.12'
           cache: pip
-
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
-      - name: Validate secrets
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          TG_SESSION: ${{ secrets.TG_SESSION }}
-        run: |
-          python - <<'PY'
-          import os
-          required = ["BOT_TOKEN", "CHAT_ID", "API_ID", "API_HASH", "TG_SESSION"]
-          missing = [x for x in required if not os.getenv(x)]
-          if missing:
-              raise SystemExit("Missing secrets: " + ", ".join(missing))
-          try:
-              int(os.environ["CHAT_ID"])
-              int(os.environ["API_ID"])
-          except ValueError as exc:
-              raise SystemExit("CHAT_ID and API_ID must be integers") from exc
-          print("Secrets validation passed")
-          PY
-
+        run: python -m pip install -r requirements.txt
+      - name: Run tests without credentials
+        run: python -m unittest discover -s tests -t . -v
       - name: Restore state
+        if: ${{ !inputs.dry_run }}
         uses: actions/cache/restore@v4
         with:
           path: proxy_state.db
-          key: proxy-state-${{ github.run_id }}
+          key: proxy-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            proxy-state-
-
-      - name: Syntax check
-        run: python -m compileall -q bot.py checker.py formatter.py sources.py state.py
-
-      - name: Unit tests
-        env:
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python -m unittest discover -s tests -t . -v
-
-      - name: Import and smoke test
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          TG_SESSION: ${{ secrets.TG_SESSION }}
-          STATE_DB: smoke_state.db
+            proxy-state-${{ github.ref_name }}-
+      - name: Check and publish
         run: |
-          python - <<'PY'
-          import bot, checker, formatter, sources, state
-          sample = "tg://proxy?server=127.0.0.1&port=443&secret=0123456789abcdef0123456789abcdef"
-          parsed = sources.extract_from_text(sample)
-          assert len(parsed) == 1 and parsed[0]["protocol"] == "MTPROTO"
-          assert formatter.build_connect_link(parsed[0]).startswith("tg://proxy?")
-          state.init_db()
-          assert state.count_seen() == 0
-          assert state.count_published() == 0
-          print("Import and smoke test passed")
-          PY
-          rm -f smoke_state.db
-
-      - name: Run bot
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          TOPIC_ID: ${{ secrets.TOPIC_ID }}
-          API_ID: ${{ secrets.API_ID }}
-          API_HASH: ${{ secrets.API_HASH }}
-          TG_SESSION: ${{ secrets.TG_SESSION }}
-          LOG_LEVEL: INFO
-          PUBLISH_COUNT: 9
-          TARGET_MT: 3
-          TARGET_SOCKS5: 3
-          TARGET_WEB: 3
-          CONCURRENCY: 15
-          MAX_MT_CHECK: 500
-          MAX_SOCKS5_CHECK: 200
-          MAX_WEB_CHECK: 100
-          CHECK_TIMEOUT: 8
-          WEB_CHECK_TIMEOUT: 15
-          SOCKS_CHECK_TIMEOUT: 10
-          MAX_PING_MS: 5000
-          MAX_WEB_PING_MS: 10000
-          GEO_TIMEOUT: 5
-          MAX_GEO_CONCURRENCY: 5
-          SEEN_TTL: 1800
-          PUBLISHED_TTL: 21600
-          SOURCE_STATS_TTL: 604800
-          MESSAGES_LIMIT: 200
-          THREAD_LIMIT: 80
-          SOURCE_TIMEOUT: 30
-          SOURCE_DELAY: 1
-          SOCKS_TEST_URL: https://api.telegram.org
-          WEB_PROXY_MODE: websocket-lanes
-        run: python -u bot.py
-
-      - name: State statistics
-        if: always()
-        run: |
-          if [ -f proxy_state.db ]; then
-            python - <<'PY'
-          import sqlite3
-          try:
-              with sqlite3.connect("proxy_state.db") as db:
-                  tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                  if {"seen_proxies", "published_proxies", "source_stats"} <= tables:
-                      seen = db.execute("SELECT COUNT(*) FROM seen_proxies").fetchone()[0]
-                      published = db.execute("SELECT COUNT(*) FROM published_proxies").fetchone()[0]
-                      sources = db.execute("SELECT COUNT(*) FROM source_stats").fetchone()[0]
-                      print(f"seen={seen} published={published} sources={sources}")
-                  else:
-                      print("state database exists but schema is incomplete")
-          except sqlite3.Error as exc:
-              print(f"state statistics unavailable: {exc}")
-          PY
+          if [ '${{ inputs.dry_run }}' = 'true' ]; then
+            python -u bot.py --dry-run
           else
-            echo "state database was not created"
+            python -u bot.py
           fi
-
       - name: Save state
-        if: always()
+        if: ${{ always() && !inputs.dry_run && hashFiles('proxy_state.db') != '' }}
         uses: actions/cache/save@v4
         with:
           path: proxy_state.db
-          key: proxy-state-${{ github.run_id }}
+          key: proxy-state-${{ github.ref_name }}-${{ github.run_id }}

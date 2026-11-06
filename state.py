@@ -1,7 +1,9 @@
 """Persistent SQLite state for discovery/checking/publishing."""
+
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -9,25 +11,30 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from proxy_utils import canonical_secret_hex
+
 logger = logging.getLogger(__name__)
-DB_PATH = Path(os.getenv("STATE_DB", Path(__file__).with_name("proxy_state.db")))
-SEEN_TTL = max(0, int(os.getenv("SEEN_TTL", 30 * 60)))
-PUBLISHED_TTL = max(0, int(os.getenv("PUBLISHED_TTL", 6 * 3600)))
-SOURCE_STATS_TTL = max(0, int(os.getenv("SOURCE_STATS_TTL", 7 * 24 * 3600)))
+DB_PATH = Path(os.getenv("STATE_DB") or Path(__file__).with_name("proxy_state.db"))
+SEEN_TTL = max(0, int(os.getenv("SEEN_TTL", "1800")))
+PUBLISHED_TTL = max(0, int(os.getenv("PUBLISHED_TTL", "21600")))
+SOURCE_STATS_TTL = max(0, int(os.getenv("SOURCE_STATS_TTL", "604800")))
 
 
 def proxy_identity(proxy: dict) -> str:
     protocol = str(proxy.get("protocol", "")).strip().upper()
-    host = str(proxy.get("ip", proxy.get("host", ""))).strip().lower()
+    host = str(proxy.get("ip", proxy.get("host", ""))).strip().lower().rstrip(".")
     try:
         port = int(proxy.get("port", 0))
     except (TypeError, ValueError):
         port = 0
     if protocol in {"MTPROTO", "WEB"}:
-        tail = str(proxy.get("secret", "")).strip().lower()
+        value = str(proxy.get("secret", "")).strip()
+        tail = canonical_secret_hex(value) or value
     elif protocol == "SOCKS5":
-        # Разные логины на одном host:port — это разные прокси.
-        tail = f"{proxy.get('user', '')}:{proxy.get('pass', '')}"
+        # JSON prevents ambiguous pairs such as ("a:b", "c") and ("a", "b:c").
+        tail = json.dumps(
+            [proxy.get("user", ""), proxy.get("pass", "")], ensure_ascii=True
+        )
     else:
         tail = ""
     return f"{protocol}|{host}|{port}|{tail}"
@@ -111,7 +118,7 @@ def _blocked_hashes(
     blocked: set[str] = set()
     with _connect() as conn:
         for start in range(0, len(hashes), 900):
-            chunk = hashes[start:start + 900]
+            chunk = hashes[start : start + 900]
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
                 f"SELECT hash FROM {table} "
@@ -127,6 +134,16 @@ def filter_unpublished(proxies: list[dict]) -> list[dict]:
     cutoff = time.time() - PUBLISHED_TTL
     hashes = [h for _, h in pairs]
     blocked = _blocked_hashes("published_proxies", "published_at", hashes, cutoff)
+    return [p for p, h in pairs if h not in blocked]
+
+
+def filter_unseen(proxies: list[dict]) -> list[dict]:
+    """Avoid rechecking recent failures until SEEN_TTL has expired."""
+    pairs = _rows_to_hashes(proxies)
+    hashes = [h for _, h in pairs]
+    blocked = _blocked_hashes(
+        "seen_proxies", "last_seen", hashes, time.time() - SEEN_TTL
+    )
     return [p for p, h in pairs if h not in blocked]
 
 
@@ -146,7 +163,8 @@ def mark_seen_many(proxies: list[dict]) -> None:
     if not rows:
         return
     with _connect() as conn:
-        conn.executemany("""
+        conn.executemany(
+            """
         INSERT INTO seen_proxies(
           hash,identity,protocol,host,port,first_seen,last_seen,check_count
         )
@@ -154,7 +172,9 @@ def mark_seen_many(proxies: list[dict]) -> None:
         ON CONFLICT(hash) DO UPDATE SET
           last_seen=excluded.last_seen,
           check_count=seen_proxies.check_count+1
-        """, rows)
+        """,
+            rows,
+        )
 
 
 def mark_seen(proxy: dict) -> None:
@@ -179,7 +199,8 @@ def mark_published(proxy: dict) -> None:
     except (TypeError, ValueError):
         ping = None
     with _connect() as conn:
-        conn.execute("""
+        conn.execute(
+            """
         INSERT INTO published_proxies(
           hash,identity,protocol,host,port,published_at,ping_ms
         )
@@ -187,7 +208,9 @@ def mark_published(proxy: dict) -> None:
         ON CONFLICT(hash) DO UPDATE SET
           published_at=excluded.published_at,
           ping_ms=excluded.ping_ms
-        """, (_hash(proxy), _identity_digest(proxy), protocol, host, port, now, ping))
+        """,
+            (_hash(proxy), _identity_digest(proxy), protocol, host, port, now, ping),
+        )
 
 
 def record_source_stats(source: str, fetched: int, working: int) -> None:
@@ -196,7 +219,8 @@ def record_source_stats(source: str, fetched: int, working: int) -> None:
     now = time.time()
     with _connect() as conn:
         if working > 0:
-            conn.execute("""
+            conn.execute(
+                """
             INSERT INTO source_stats(
               source,total_fetched,total_working,last_success,
               last_failure,consecutive_failures
@@ -207,9 +231,12 @@ def record_source_stats(source: str, fetched: int, working: int) -> None:
               total_working=source_stats.total_working+excluded.total_working,
               last_success=excluded.last_success,
               consecutive_failures=0
-            """, (source, fetched, working, now))
+            """,
+                (source, fetched, working, now),
+            )
         else:
-            conn.execute("""
+            conn.execute(
+                """
             INSERT INTO source_stats(
               source,total_fetched,total_working,last_failure,consecutive_failures
             )
@@ -218,22 +245,22 @@ def record_source_stats(source: str, fetched: int, working: int) -> None:
               total_fetched=source_stats.total_fetched+excluded.total_fetched,
               last_failure=excluded.last_failure,
               consecutive_failures=source_stats.consecutive_failures+1
-            """, (source, fetched, now))
+            """,
+                (source, fetched, now),
+            )
 
 
 def cleanup() -> None:
     now = time.time()
     with _connect() as conn:
-        conn.execute(
-            "DELETE FROM seen_proxies WHERE last_seen < ?", (now - SEEN_TTL,)
-        )
+        conn.execute("DELETE FROM seen_proxies WHERE last_seen < ?", (now - SEEN_TTL,))
         conn.execute(
             "DELETE FROM published_proxies WHERE published_at < ?",
             (now - PUBLISHED_TTL,),
         )
         conn.execute(
             "DELETE FROM source_stats "
-            "WHERE last_success IS NOT NULL AND last_success < ?",
+            "WHERE MAX(COALESCE(last_success, 0), COALESCE(last_failure, 0)) < ?",
             (now - SOURCE_STATS_TTL,),
         )
 

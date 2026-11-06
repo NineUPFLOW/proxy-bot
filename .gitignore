@@ -32,3 +32,7 @@ seen.json
 *.swp
 *.tmp
 *.log
+
+# Optional local sources can contain access credentials or private proxy keys.
+sources.local.json
+custom-proxies.txt

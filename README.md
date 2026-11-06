@@ -1,206 +1,142 @@
-<div align="center">
+# Proxy Bot
 
+Бот собирает открытые прокси для Telegram из **HTTPS-каталогов и локальных файлов**, проверяет их из сети запуска и публикует только прошедшие проверку. Для получения списков он не читает Telegram-каналы и не использует пользовательский аккаунт Telegram.
 
-# 🔐 Proxy Bot
+> **Важно про Россию.** Проверка на сервере за границей не доказывает доступность в России. По умолчанию бот отказывается публиковать, если страна внешнего IPv4 проверяющей машины не определяется как `RU`. Нужна машина или self-hosted runner с прямым выходом в интернет из нужной российской сети. Геолокация IP приблизительна, маршруты могут отличаться, а прокси могут перестать работать в любой момент: 100% гарантии для всех российских провайдеров нет.
 
-**Автоматический сбор, проверка и публикация рабочих прокси в Telegram**
+## Что изменилось
 
-[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-active-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/NineUPFLOW/proxy-bot/actions)
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![aiogram](https://img.shields.io/badge/aiogram-3.15-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://github.com/aiogram/aiogram)
-[![Telethon](https://img.shields.io/badge/Telethon-1.36-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://github.com/LonamiWebs/Telethon)
-[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](https://opensource.org/licenses/MIT)
+- Источники настраиваются в [`sources.json`](sources.json): HTTPS TXT/HTML/JSON и локальные файлы. `t.me`, `telegram.me`, `telegram.dog`, `telegram.org` и HTTP-источники запрещены. Сами ссылки `tg://proxy`, `tg://webproxy`, `tg://socks` в списках допустимы: это **данные**, а не адреса источников.
+- `TG_SESSION`, `API_ID` и `API_HASH` не нужны. Telegram Bot API используется только для публикации.
+- Поддерживаются MTProto, включая **Fake TLS (`ee`)**, обычный и `dd`; SOCKS5; Telegram WEB Proxy.
+- Проверяется не только открытый порт: отправляется MTProto `req_pq_multi`, проверяется ответ и совпадение nonce. Для Fake TLS проверяется HMAC ServerHello; для SOCKS5 — доступ к реальному DC Telegram, для WEB — обмен через WEB-транспорт. Тест не является полной авторизацией клиента и не гарантирует работу звонков, медиа и всех DC.
+- По умолчанию нужны **2 успеха из 3 попыток** и ещё одна проверка непосредственно перед отправкой. Недоступный на финальном шаге прокси заменяется следующим кандидатом; одинаковые IP ограничены. Время проверки и страна узла указываются в сообщении.
+- Веб-запросы ограничены по времени и размеру; публичные прокси разрешаются только в публичные IPv4-адреса. Для WEB имя и проверенный IP закрепляются на время соединения, перенаправления запрещены.
 
-Работает на **GitHub Actions** — без собственного сервера
+Внешние каталоги могут менять или заимствовать свои данные. Бот **не обращается к Telegram за списками**, но не может удостовериться в первоначальном происхождении данных третьих сторон. Для полной независимости на уровне происхождения отключите сторонние каталоги и используйте собственный файл или проверенного поставщика.
 
-</div>
+## Установка и локальный запуск
 
----
+Требуются Python **3.11+**, `git` (для установки зафиксированной зависимости проверки MTProxy) и доступ в интернет. Выполняйте в каталоге репозитория:
 
-## ✨ Возможности
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 
-| | |
-|:---:|---|
-| 📡 | Сбор из **Telegram-источников**, включая темы (Topics) |
-| 🧠 | Анализ **Secret** — приоритет Fake TLS и probe-resistant |
-| 🔬 | Реальная проверка через **handshake Telethon** + `ya.ru` |
-| 🚫 | Фильтр мусора — `MAX_PING_MS = 5000` |
-| 📊 | Выборка **9 прокси**: 3 MTProto + 3 SOCKS5 + 3 WEB |
-| 💾 | **SQLite-состояние** (seen 2ч, published 24ч) |
-| 🚀 | **Автозапуск** каждые 10 минут |
-
----
-
-## 🔐 Секреты
-
-<div align="center">
-
-**Settings → Secrets and variables → Actions → New repository secret**
-
-</div>
-
-| Имя | Обяз. | Описание |
-|---|:---:|---|
-| `BOT_TOKEN` | ✅ | Токен от [@BotFather](https://t.me/BotFather) |
-| `CHAT_ID` | ✅ | ID чата (например, `-1001234567890`) |
-| `TOPIC_ID` | ⚠️ | ID темы (если есть). Иначе не добавлять |
-| `API_ID` | ✅ | С [my.telegram.org](https://my.telegram.org) |
-| `API_HASH` | ✅ | С [my.telegram.org](https://my.telegram.org) |
-| `TG_SESSION` | ✅ | Строка сессии Telethon |
-
-### 🔑 TG_SESSION
-
-<div align="center">
-
-### 👉 [**SSG — String Session Generator**](https://gabrielmaialva33.github.io/ssg/) 👈
-
-</div>
-
-1. Введите `API_ID`, `API_HASH`, номер телефона.
-2. Введите код из Telegram.
-3. Строка придёт в **«Избранное»** — скопируйте в `TG_SESSION`.
-
-> ⚠️ Сессия = полный доступ к аккаунту. Используйте **отдельный аккаунт**.
-
-### 💬 CHAT_ID
-
-Перешлите любое сообщение из группы боту [@userinfobot](https://t.me/userinfobot).
-
-### 🧵 TOPIC_ID
-
-Отправьте сообщение в нужную тему → правый клик → **Copy Message Link**. Ссылка вида `https://t.me/c/1234567890/15/42` — число **15** это `TOPIC_ID`. Если тем нет — не создавайте секрет.
-
----
-
-## 🚀 Запуск
-
-```
-1. Форк репозитория
-2. Добавьте 6 секретов
-3. Actions → Proxy Bot → Run workflow
+# Без токенов, сообщений и изменения базы; строгая проверка страны включена.
+python bot.py --dry-run
 ```
 
-Дальше — сам каждые 10 минут.
+Для диагностики **из другой страны** разрешён явно нестрогий запуск:
 
----
-
-## 📊 Что публикуется
-
-| Протокол | Проверка | Приоритет |
-|---|---|:---:|
-| 🔐 **MTProto Fake TLS** | Handshake 3/2 + probe | 🥇 |
-| 🔐 **MTProto** | Handshake 3/2 | 🥈 |
-| 🌐 **WEB** | Handshake 3/2 | 🥉 |
-| 🧦 **SOCKS5** | проверка на доступ к  Telegram API| Обычный |
-
-**9 прокси за запуск:** 3 MTProto + 3 SOCKS5 + 3 WEB. Чего не хватает — добирается MTProto.
-
----
-
-## ⚙️ Настройка
-
-<details>
-<summary><b>bot.py</b></summary>
-
-| Параметр | По умолчанию |
-|---|:---:|
-| `PUBLISH_COUNT` | `9` |
-| `TARGET_MT` / `TARGET_SOCKS5` / `TARGET_WEB` | `3` / `3` / `3` |
-| `CONCURRENCY` | `20` |
-| `MAX_MT_CHECK` | `400` |
-| `MAX_SOCKS5_CHECK` | `100` |
-
-</details>
-
-<details>
-<summary><b>checker.py</b></summary>
-
-| Параметр | По умолчанию |
-|---|:---:|
-| `MAX_PING_MS` | `5000` |
-| `MT_ATTEMPTS` / `MT_REQUIRED` | `3` / `2` |
-
-</details>
-
-**Расписание** в `.github/workflows/run.yml`:
-
-```yaml
-- cron: '*/10 * * * *'
+```bash
+REQUIRE_RU_CHECK=0 python bot.py --dry-run
 ```
 
----
+Такой запуск не подтверждает работу из РФ. Если отключить строгий режим для обычной публикации, в сообщениях будет указана обнаруженная страна проверки, а не `RU` по умолчанию.
 
-## 💾 Состояние
+Для публикации создайте бота через [@BotFather](https://t.me/BotFather), добавьте его в чат/канал с правом отправки сообщений и задайте переменные:
 
-SQLite `proxy_state.db` (в `actions/cache`, не в git):
-
-| Таблица | TTL |
-|---|:---:|
-| `seen_proxies` | 2 часа |
-| `published_proxies` | 24 часа |
-
----
-
-## 🛠 Возможные проблемы
-
-<details>
-<summary><b>BOT_TOKEN invalid</b></summary>
-Проверьте формат <code>123456:ABC...</code>
-</details>
-
-<details>
-<summary><b>CHAT_ADMIN_REQUIRED</b></summary>
-Сделайте бота администратором группы.
-</details>
-
-<details>
-<summary><b>Message thread not found</b></summary>
-Уберите секрет <code>TOPIC_ID</code> или проверьте ID темы.
-</details>
-
-<details>
-<summary><b>AuthKeyUnregisteredError</b></summary>
-Перегенерируйте <code>TG_SESSION</code> через SSG.
-</details>
-
-<details>
-<summary><b>Cron не срабатывает</b></summary>
-Пустой коммит в <code>README.md</code> + включите workflow в Actions.
-</details>
-
-<details>
-<summary><b>SOCKS5 / WEB не публикуются</b></summary>
-Норма — их мало живых в открытых источниках.
-</details>
-
----
-
-## 📁 Структура
-
-```
-proxy-bot/
-├── .github/workflows/run.yml   # Cron + запуск
-├── bot.py                      # Основной цикл
-├── sources.py                  # Парсер Telegram-источников
-├── checker.py                  # Проверка + probe test
-├── formatter.py                # Оформление сообщений
-├── state.py                    # SQLite-состояние
-├── tests/                      # Юнит-тесты (python -m unittest discover -s tests -t .)
-├── requirements.txt            # Зависимости
-├── LICENSE                     # MIT
-└── README.md
+```bash
+export BOT_TOKEN='токен бота'
+export CHAT_ID='-1001234567890'
+# Необязательно: ID темы в супергруппе
+# export TOPIC_ID='123'
+python bot.py
 ```
 
----
+`CHAT_ID` — числовой ID чата. Если `TOPIC_ID` указан неверно, бот **не переключится молча** на другую тему. Для Windows задайте те же переменные средствами PowerShell или окружения.
 
-<div align="center">
+Если Bot API из российской сети недоступен, можно задать `BOT_PROXY_URL`, например `socks5://user:password@host:port`. Этот прокси используется **только для отправки сообщений**, а не для поиска, геолокации исходящего IP и проверки кандидатов. Храните URL как секрет. Системный VPN/туннель, меняющий маршрут проверок, применять нельзя: тогда проверяется уже другая сеть.
 
-## 📝 Лицензия
+### Переход со старой версии
 
-**MIT** — используйте как хотите
+1. Обновите код и зависимости: `python -m pip install -r requirements.txt`.
+2. Удалите `TG_SESSION`, `API_ID`, `API_HASH` и `TELEGRAM_SOURCES` из настроек запуска — они больше не используются. Если ранее использовалась личная сессия, при необходимости завершите её в Telegram: **Настройки → Устройства**.
+3. Настройте машину проверки в РФ, `BOT_TOKEN` и `CHAT_ID`. При необходимости добавьте `TOPIC_ID` и `BOT_PROXY_URL`.
+4. Проверьте источники в `sources.json`, выполните `python bot.py --dry-run`, затем обычный запуск.
 
----
+Схема локальной SQLite-базы сохраняется, но идентификаторы некоторых прокси изменились. В Actions используется новый ключ кеша. Поэтому после перехода возможна разовая повторная публикация ранее отправленных прокси.
 
-⭐ **Если проект полезен — поставьте звезду!** ⭐
+## GitHub Actions: запуск из России
 
-</div>
+GitHub-hosted `ubuntu-latest` обычно работает не в РФ. Просто включить cron недостаточно: для реальной проверки установите **self-hosted runner** в российской сети, наиболее близкой к сети ваших пользователей. VPS в РФ тоже не эквивалентен мобильному интернету конкретного оператора.
+
+1. В репозитории откройте **Settings → Actions → Runners → New self-hosted runner** и зарегистрируйте Linux-машину в российской сети. Добавьте ей метку `ru-proxy`.
+2. В **Settings → Secrets and variables → Actions → Variables** создайте:
+
+   | Переменная | Значение |
+   |---|---|
+   | `PROXY_RUNNER_LABELS` | `["self-hosted","linux","ru-proxy"]` |
+
+3. В разделе **Secrets** задайте `BOT_TOKEN` и `CHAT_ID`; по необходимости — `TOPIC_ID` и `BOT_PROXY_URL`.
+4. В **Actions → Проверка и публикация прокси → Run workflow** сначала включите `dry_run`, затем запустите обычную публикацию.
+
+После настройки runner задания запускаются по расписанию раз в 15 минут; GitHub может задерживать расписание и использует workflow из основной ветки репозитория. До задания `PROXY_RUNNER_LABELS` запуск по расписанию пропускается, а ручной запуск на GitHub-hosted runner в строгом режиме остановится, если внешний IPv4 не определяется как российский. `REQUIRE_RU_CHECK` можно задать как Actions Variable (`1` по умолчанию, `0` только для осознанного нестрогого режима). Тестовый workflow `CI` работает на GitHub-hosted runner и не требует секретов. Самостоятельный runner следует использовать только с доверенным кодом репозитория.
+
+Состояние `proxy_state.db` восстанавливается и сохраняется через Actions cache. Для самостоятельного runner доступ к внешним каталогам, GitHub и сервисам определения страны должен быть разрешён. Доступ к Bot API может идти отдельно через `BOT_PROXY_URL`.
+
+## Настройка источников
+
+Стандартные источники перечислены в `sources.json`: отдельный веб-API, несколько каталогов на GitHub и два HTTPS-списка SOCKS5. Они не считаются достоверными сами по себе: **каждый кандидат бот проверяет повторно**. При ошибке одного источника остальные продолжают работать. Небольшие источники не вытесняются большими при ограничении числа проверок.
+
+Пример альтернативного файла `sources.local.json`:
+
+```json
+{
+  "sources": [
+    {"name": "my-proxies", "format": "links", "path": "custom-proxies.txt"},
+    {"name": "provider", "format": "links", "url": "https://example.com/proxies.txt"},
+    {"name": "socks-list", "format": "socks5", "url": "https://example.com/socks5.txt"}
+  ]
+}
+```
+
+В `custom-proxies.txt` — по одной ссылке `tg://proxy?...`, `tg://webproxy?...` или `tg://socks?...` на строку. `links` также понимает ссылки внутри HTML, Markdown и JSON. Для `socks5` допускаются как `socks5://host:port`, так и строки `IPv4:port`. Обычные `IP:port` в смешанных списках не считаются SOCKS5 без указания протокола. Примеры доменов `example.com` нужно заменить на свои.
+
+```bash
+SOURCES_FILE=./sources.local.json python bot.py --dry-run
+```
+
+Для Actions путь можно задать переменной `SOURCES_FILE`; для приватного локального файла на self-hosted runner используйте абсолютный путь **вне checkout**, который может очищаться при запуске. `sources.local.json` и `custom-proxies.txt` добавлены в `.gitignore`, но другие файлы с секретами нужно исключать самостоятельно. Не размещайте приватные ссылки или токены в публичном репозитории.
+
+## Параметры окружения
+
+| Переменная | По умолчанию | Назначение |
+|---|---:|---|
+| `REQUIRE_RU_CHECK` | `1` | Строго требовать определение российского IPv4 до и после проверки; остановиться при смене IP. |
+| `SOURCES_FILE` | `sources.json` | Путь к JSON-конфигурации источников. |
+| `PUBLISH_COUNT` | `9` | Максимум сообщений за запуск. Может быть меньше, если прошедших проверку недостаточно. |
+| `TARGET_MT`, `TARGET_SOCKS5`, `TARGET_WEB` | `3`, `3`, `3` | Желаемое количество по протоколам; недостаток заполняется другими подходящими кандидатами. |
+| `MAX_PER_IP` | `1` | Максимум публикаций на один проверенный IPv4 за запуск; `0` отключает ограничение. |
+| `CONCURRENCY` | `20` | Число параллельных проверок. |
+| `MAX_MT_CHECK`, `MAX_SOCKS5_CHECK`, `MAX_WEB_CHECK` | `150`, `150`, `30` | Максимум проверяемых кандидатов каждого типа. |
+| `CHECK_ATTEMPTS`, `CHECK_REQUIRED` | `3`, `2` | Количество раундов и требуемое число успехов; допустимо `1 ≤ required ≤ attempts ≤ 10`. |
+| `CHECK_TIMEOUT`, `SOCKS_CHECK_TIMEOUT`, `WEB_CHECK_TIMEOUT` | `8`, `8`, `12` | Таймаут одной попытки в секундах. |
+| `MAX_PING_MS`, `MAX_WEB_PING_MS` | `5000`, `10000` | Максимальное время успешной попытки. Это время MTProto-обмена, а не ICMP ping. |
+| `WEB_PROXY_MODE` | `auto` | Режим по ответу WEB-сервера; также `websocket-lanes`, `websocket`, `https`, `https-lanes`. |
+| `SEEN_TTL`, `PUBLISHED_TTL`, `SOURCE_STATS_TTL` | `1800`, `21600`, `604800` | Время ожидания перед перепроверкой неудачных кандидатов, повторной публикацией и очисткой статистики (секунды). |
+| `GEO_ENABLED` | `0` | Дополнительно определить страну сервера через ipwho.is; это не страна проверки. |
+| `SEND_STATUS` | `0` | Отправлять служебные сообщения при отсутствии кандидатов. |
+| `SOURCE_TIMEOUT`, `SOURCE_CONCURRENCY`, `MAX_SOURCE_BYTES`, `MAX_PER_SOURCE` | `20`, `4`, `2097152`, `10000` | Ограничения загрузки источников. |
+| `STATE_DB`, `LOG_LEVEL`, `SEND_DELAY` | `proxy_state.db`, `INFO`, `2` | Путь к базе, уровень логирования, задержка между сообщениями. |
+
+Для Actions дополнительные параметры можно добавить в `env` в `.github/workflows/run.yml`. Секреты не добавляйте в YAML.
+
+## Проверка и ограничения
+
+```bash
+python -m compileall -q bot.py checker.py formatter.py network.py proxy_utils.py sources.py state.py
+python -m unittest discover -s tests -t . -v
+```
+
+Тесты не обращаются к внешней сети и не требуют Telegram-секретов. В них есть локальные тестовые серверы для SOCKS5, MTProto и Fake TLS, проверки неверного nonce, повторных попыток, DNS, состояния и строгой проверки страны.
+
+Проверка и геолокация используют IPv4. DNS клиента может разрешить имя прокси иначе, чем проверяющая машина. Определение страны проверяющего IP не доказывает маршрутизацию каждого конкретного соединения, особенно при VPN, split tunneling или неточной GeoIP-базе. Проверка nonce без полной авторизации не защищает от умышленной подделки ответа владельцем прокси. Открытые прокси находятся под контролем третьих лиц: они видят ваш IP и часть метаданных; не считайте их приватными или доверенными.
+
+Если прокси не публикуются, проверьте логи: страна исходящего IP, доступность источников, таймауты, настройки бота и права в чате. Если ни один прокси не прошёл проверку, бот не публикует «для количества».
+
+## Лицензия
+
+Проект — MIT, см. [LICENSE](LICENSE). Для протокольных примитивов используется [mtproxychecker](https://github.com/alimghmi/mtproxychecker), зафиксированный на конкретном коммите (MIT); WEB-транспорт — `telethon-webproxy` (MIT).
