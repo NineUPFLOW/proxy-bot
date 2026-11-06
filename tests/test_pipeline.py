@@ -442,6 +442,9 @@ class ProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.host, self.secret = host, secret
                 instances.append(self)
 
+            def _dispatch_frame(self, frame_type, stream_id, payload):
+                pass
+
             async def _start_transport(self):
                 pass
 

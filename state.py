@@ -49,6 +49,40 @@ def _identity_digest(proxy: dict) -> str:
 
 
 @contextmanager
+def publication_lock():
+    """Prevent concurrent publishers sharing this local state database.
+
+    A separate SQLite lock file avoids holding a transaction on the state DB;
+    closing the connection (also on process death) releases the OS lock. Keep
+    the empty file itself in place so a waiter cannot lock a different inode.
+    """
+    database = DB_PATH.expanduser().resolve()
+    lock_path = database.with_name(database.name + ".runlock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(lock_path, timeout=0, isolation_level=None)
+    except (OSError, sqlite3.Error) as exc:
+        raise RuntimeError(
+            "Не удалось открыть блокировку; проверьте STATE_DB."
+        ) from exc
+    try:
+        try:
+            conn.execute("BEGIN EXCLUSIVE")
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+            if code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise RuntimeError(
+                    "Другой запуск с этой базой уже выполняется; публикация остановлена."
+                ) from exc
+            raise RuntimeError(
+                "Не удалось установить блокировку; проверьте STATE_DB."
+            ) from exc
+        yield
+    finally:
+        conn.close()
+
+
+@contextmanager
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)

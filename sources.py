@@ -31,7 +31,9 @@ SOURCE_CONCURRENCY = max(1, int(os.getenv("SOURCE_CONCURRENCY", "4")))
 MAX_SOURCE_BYTES = max(1024, int(os.getenv("MAX_SOURCE_BYTES", str(2 * 1024 * 1024))))
 MAX_PER_SOURCE = max(1, int(os.getenv("MAX_PER_SOURCE", "10000")))
 
-RE_MARKDOWN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+# Exclude new opening brackets from both fields: otherwise malformed input
+# like '[' * 200000 or '[](' * 50000 causes quadratic regex backtracking.
+RE_MARKDOWN = re.compile(r"\[[^\[\]\r\n]*\]\(([^)\[\]\r\n]+)\)")
 RE_HTML_HREF = re.compile(r"href=['\"]([^'\"]+)['\"]", re.I)
 RE_URL = re.compile(
     r"(?:tg://(?:proxy|socks|webproxy)\?[^\s<>\"']+"

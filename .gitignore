@@ -18,6 +18,7 @@ proxy_state.db
 proxy_state.db-journal
 proxy_state.db-wal
 proxy_state.db-shm
+proxy_state.db.runlock*
 
 smoke_state.db
 smoke_state.db-journal

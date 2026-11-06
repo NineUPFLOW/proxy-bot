@@ -77,6 +77,7 @@ TELEGRAM_DC_IP = "149.154.167.51"
 TELEGRAM_DC_PORT = 443
 MAX_FRAME = 256 * 1024
 MAX_WEB_RESPONSE = 256 * 1024
+MAX_WEB_FRAMES = 1024
 
 _geo_cache: dict[str, dict] = {}
 _geo_sem = asyncio.Semaphore(MAX_GEO_CONCURRENCY)
@@ -398,6 +399,40 @@ class _BoundedResponse(aiohttp.ClientResponse):
         return self._body
 
 
+class _BoundedWebSession:
+    """Keep the pinned session, but cap the library's larger WebSocket limit."""
+
+    def __init__(self, session: aiohttp.ClientSession):
+        self._session = session
+
+    def ws_connect(self, *args, **kwargs):
+        requested = kwargs.get("max_msg_size", MAX_WEB_RESPONSE)
+        if not isinstance(requested, int) or requested <= 0:
+            requested = MAX_WEB_RESPONSE  # aiohttp treats 0 as unlimited
+        kwargs["max_msg_size"] = min(requested, MAX_WEB_RESPONSE)
+        return self._session.ws_connect(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+
+def _limit_web_frames(carrier) -> None:
+    """Bound all relay frames before the library can enqueue their payloads."""
+    dispatch = carrier._dispatch_frame
+    total_bytes = 0
+    total_frames = 0
+
+    def limited_dispatch(frame_type, stream_id, payload):
+        nonlocal total_bytes, total_frames
+        total_frames += 1
+        total_bytes += 8 + len(payload)  # include the relay frame header
+        if total_frames > MAX_WEB_FRAMES or total_bytes > MAX_WEB_RESPONSE:
+            raise ValueError("WEB relay frame budget exceeded")
+        return dispatch(frame_type, stream_id, payload)
+
+    carrier._dispatch_frame = limited_dispatch
+
+
 def _web_trace(host: str) -> aiohttp.TraceConfig:
     trace = aiohttp.TraceConfig()
 
@@ -449,9 +484,10 @@ async def _web_attempt(host: str, ip: str, secret: str) -> int | None:
             if carrier_type is None:
                 raise ValueError("Unsupported WEB carrier advertised by relay")
             carrier = carrier_type(host, canonical)
-            # The library's public carrier creates an unrestricted session.
-            # Inject our bounded, host-pinned session into the carrier instead.
-            carrier._http = session
+            # The pinned library uses private carrier fields here. Limit each
+            # WebSocket message and the total frames before they enter its queue.
+            _limit_web_frames(carrier)
+            carrier._http = _BoundedWebSession(session)
             carrier._session_info = info
             await carrier._start_transport()
             carrier._connected = True

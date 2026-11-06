@@ -161,8 +161,23 @@ async def send_message(
     return False
 
 
+def _record_check_results(group: list[dict], working: list[dict]) -> None:
+    working_ids = {state.proxy_identity(item) for item in working}
+    # Successful but not-yet-published candidates remain available next run;
+    # the seen TTL is a cooldown for failed checks, not for good reserves.
+    state.mark_seen_many(
+        [proxy for proxy in group if state.proxy_identity(proxy) not in working_ids]
+    )
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for proxy in group:
+        groups[str(proxy.get("source", "unknown"))].append(proxy)
+    for source, items in groups.items():
+        count = sum(state.proxy_identity(item) in working_ids for item in items)
+        state.record_source_stats(source, len(items), count)
+
+
 async def check_group(
-    group: list[dict], name: str, *, dry_run: bool = False
+    group: list[dict], name: str, *, dry_run: bool = False, persist: bool = True
 ) -> list[dict]:
     if not group:
         logger.info("Checking %s: 0 candidates", name)
@@ -184,19 +199,8 @@ async def check_group(
     logger.info("Checking %s: %d candidates", name, len(group))
     results = await asyncio.gather(*(one(proxy) for proxy in group))
     working = dedup([p for p in results if isinstance(p, dict)])
-    if not dry_run:
-        working_ids = {state.proxy_identity(item) for item in working}
-        # Successful but not-yet-published candidates remain available next run;
-        # the seen TTL is a cooldown for failed checks, not for good reserves.
-        state.mark_seen_many(
-            [proxy for proxy in group if state.proxy_identity(proxy) not in working_ids]
-        )
-        groups: dict[str, list[dict]] = defaultdict(list)
-        for proxy in group:
-            groups[str(proxy.get("source", "unknown"))].append(proxy)
-        for source, items in groups.items():
-            count = sum(state.proxy_identity(item) in working_ids for item in items)
-            state.record_source_stats(source, len(items), count)
+    if not dry_run and persist:
+        _record_check_results(group, working)
     logger.info("%s: %d/%d passed repeated checks", name, len(working), len(group))
     return working
 
@@ -208,7 +212,11 @@ def _sort_key(proxy: dict) -> tuple[int, int]:
         return 0, 99999
 
 
-def select_proxies(working: list[dict]) -> list[dict]:
+def select_proxies(
+    working: list[dict], *, already_selected: list[dict] | None = None
+) -> list[dict]:
+    """Fill protocol targets first, accounting for already confirmed proxies."""
+    previous = already_selected or []
     pools: dict[str, list[dict]] = {protocol: [] for protocol in TARGETS}
     for proxy in working:
         protocol = str(proxy.get("protocol", "")).upper()
@@ -217,15 +225,20 @@ def select_proxies(working: list[dict]) -> list[dict]:
     for pool in pools.values():
         pool.sort(key=_sort_key)
     selected: list[dict] = []
-    used: set[str] = set()
-    ips: Counter = Counter()
+    used = {state.proxy_identity(proxy) for proxy in previous}
+    ips: Counter = Counter(
+        str(proxy.get("resolved_ip") or proxy.get("ip", "")) for proxy in previous
+    )
+    protocol_counts: Counter = Counter(
+        str(proxy.get("protocol", "")).upper() for proxy in previous
+    )
 
     def add(proxy: dict) -> bool:
         identity = state.proxy_identity(proxy)
         ip = str(proxy.get("resolved_ip") or proxy.get("ip", ""))
         if identity in used or (MAX_PER_IP and ips[ip] >= MAX_PER_IP):
             return False
-        if len(selected) >= PUBLISH_COUNT:
+        if len(previous) + len(selected) >= PUBLISH_COUNT:
             return False
         selected.append(proxy)
         used.add(identity)
@@ -233,14 +246,14 @@ def select_proxies(working: list[dict]) -> list[dict]:
         return True
 
     for protocol, target in TARGETS.items():
-        count = 0
+        count = protocol_counts[protocol]
         for proxy in pools[protocol]:
-            if count >= target or len(selected) >= PUBLISH_COUNT:
+            if count >= target or len(previous) + len(selected) >= PUBLISH_COUNT:
                 break
             if add(proxy):
                 count += 1
     for proxy in sorted(working, key=_sort_key):
-        if len(selected) >= PUBLISH_COUNT:
+        if len(previous) + len(selected) >= PUBLISH_COUNT:
             break
         add(proxy)
     return selected
@@ -252,6 +265,23 @@ async def run(
     topic_id: int | None = None,
     *,
     dry_run: bool = False,
+) -> list[dict]:
+    if dry_run:
+        return await _run(bot, chat_id, topic_id, dry_run=True)
+    if bot is None or chat_id is None:
+        raise ValueError("bot and chat_id are required for publication")
+    # The lock is held until every send and state write has completed. A dry
+    # run never acquires it or creates a lock/state file.
+    with state.publication_lock():
+        return await _run(bot, chat_id, topic_id, dry_run=False)
+
+
+async def _run(
+    bot: Bot | None,
+    chat_id: int | None,
+    topic_id: int | None,
+    *,
+    dry_run: bool,
 ) -> list[dict]:
     location = await detect_egress_country()
     country = str(location.get("country_code", "")).upper()
@@ -268,8 +298,6 @@ async def run(
     if country != "RU":
         logger.warning("This run does not establish availability from Russia")
     if not dry_run:
-        if bot is None or chat_id is None:
-            raise ValueError("bot and chat_id are required for publication")
         state.init_db()
         state.cleanup()
     raw = dedup(await fetch_all_proxies())
@@ -289,11 +317,40 @@ async def run(
             groups[protocol].append(proxy)
     logger.info("Fresh candidates: %s", {k: len(v) for k, v in groups.items()})
     working: list[dict] = []
+    checked_batches: list[tuple[list[dict], list[dict]]] = []
     for protocol, group in groups.items():
         candidates = sample_fair(group, MAX_CHECK[protocol])
-        working.extend(await check_group(candidates, protocol, dry_run=dry_run))
+        results = await check_group(
+            candidates, protocol, dry_run=dry_run, persist=False
+        )
+        checked_batches.append((candidates, results))
+        working.extend(results)
     working = dedup(working)
     final = select_proxies(working)
+
+    # A VPN or route may have changed while the batch was running, including
+    # when every check failed. Do not persist potentially misleading failures
+    # before checking the egress again, or good proxies can be put on cooldown.
+    changed = False
+    if any(batch for batch, _ in checked_batches):
+        current_location = await detect_egress_country()
+        current_country = str(current_location.get("country_code", "")).upper()
+        changed = current_country != country or (
+            location.get("ip") and current_location.get("ip") != location["ip"]
+        )
+        if changed:
+            if REQUIRE_RU_CHECK:
+                raise RuntimeError(
+                    "Исходящий IP или страна проверки изменились; публикация остановлена."
+                )
+            logger.warning(
+                "Egress changed during checks; country and failure statistics discarded"
+            )
+            country = ""
+    if not dry_run and not changed:
+        for batch, results in checked_batches:
+            _record_check_results(batch, results)
+
     if not final:
         logger.info("No new proxies passed the checks")
         if not dry_run and SEND_STATUS:
@@ -302,33 +359,25 @@ async def run(
             )
         return []
 
-    # A VPN or route may have changed while the batch was running. Never label
-    # such a batch as checked from Russia; in strict mode stop completely.
-    current_location = await detect_egress_country()
-    current_country = str(current_location.get("country_code", "")).upper()
-    changed = current_country != country or (
-        location.get("ip") and current_location.get("ip") != location["ip"]
-    )
-    if changed:
-        if REQUIRE_RU_CHECK:
-            raise RuntimeError(
-                "Исходящий IP или страна проверки изменились; публикация остановлена."
-            )
-        logger.warning("Egress changed during checks; the check country is now unknown")
-        country = ""
-
-    # Prefer the protocol quotas first, then backfill from other checked proxies
-    # if a candidate dies at the last-moment recheck.
+    # Try the original balanced selection first, then rebuild the reserve
+    # selection using the protocols and IPs that actually survived rechecking.
     first_ids = {state.proxy_identity(p) for p in final}
-    candidates = final + sorted(
-        (p for p in working if state.proxy_identity(p) not in first_ids), key=_sort_key
-    )
+    reserves = [p for p in working if state.proxy_identity(p) not in first_ids]
+    pending = deque(final)
     confirmed: list[dict] = []
     published_ips: Counter = Counter()
     attempted = 0
-    for proxy in candidates:
-        if len(confirmed) >= PUBLISH_COUNT:
-            break
+    while len(confirmed) < PUBLISH_COUNT:
+        if not pending:
+            replacements = select_proxies(reserves, already_selected=confirmed)
+            if not replacements:
+                break
+            replacement_ids = {state.proxy_identity(p) for p in replacements}
+            reserves = [
+                p for p in reserves if state.proxy_identity(p) not in replacement_ids
+            ]
+            pending.extend(replacements)
+        proxy = pending.popleft()
         candidate_ip = str(proxy.get("resolved_ip") or proxy.get("ip", ""))
         if MAX_PER_IP and published_ips[candidate_ip] >= MAX_PER_IP:
             continue
@@ -336,7 +385,7 @@ async def run(
         fresh = await recheck_proxy(proxy)
         if not fresh:
             logger.info("Skipped stale proxy %s", proxy.get("id", "?"))
-            if not dry_run:
+            if not dry_run and not changed:
                 state.mark_seen(proxy)
             continue
         fresh["check_country"] = country
