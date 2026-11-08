@@ -7,6 +7,10 @@ on:
         description: Только проверить, без публикации и изменения состояния
         type: boolean
         default: true
+      allow_non_ru_dry_run:
+        description: Пробная проверка из любой страны; только с dry_run, без публикации
+        type: boolean
+        default: false
   schedule:
     - cron: '*/15 * * * *'
 
@@ -30,6 +34,11 @@ jobs:
       SOURCES_FILE: ${{ vars.SOURCES_FILE || 'sources.json' }}
 
     steps:
+      - name: Reject incompatible run options
+        if: ${{ inputs.allow_non_ru_dry_run && !inputs.dry_run }}
+        run: |
+          echo "::error::allow_non_ru_dry_run разрешён только вместе с dry_run; публикация запрещена."
+          exit 1
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -42,7 +51,7 @@ jobs:
       - name: Run tests without credentials
         run: python -m unittest discover -s tests -t . -v
       - name: Restore state
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && !inputs.allow_non_ru_dry_run }}
         uses: actions/cache/restore@v4
         with:
           path: proxy_state.db
@@ -50,12 +59,19 @@ jobs:
           restore-keys: |
             proxy-state-${{ github.ref_name }}-
       # Scheduled runs have no workflow_dispatch inputs and still publish.
-      # Manual dispatch defaults to dry-run unless the user unchecks it.
+      # A non-RU diagnostic must never share a step with real publication.
       - name: Dry run
-        if: ${{ inputs.dry_run }}
+        if: ${{ inputs.dry_run && !inputs.allow_non_ru_dry_run }}
         run: python -u bot.py --dry-run
+      - name: Dry run outside Russia
+        if: ${{ inputs.dry_run && inputs.allow_non_ru_dry_run }}
+        env:
+          REQUIRE_RU_CHECK: '0'
+        run: |
+          echo "::warning::Только пробная проверка из этой сети; публикации нет, работа из РФ не подтверждается."
+          python -u bot.py --dry-run
       - name: Check and publish
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && !inputs.allow_non_ru_dry_run }}
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
@@ -63,7 +79,7 @@ jobs:
           BOT_PROXY_URL: ${{ secrets.BOT_PROXY_URL }}
         run: python -u bot.py
       - name: Save state
-        if: ${{ always() && !inputs.dry_run && hashFiles('proxy_state.db') != '' }}
+        if: ${{ always() && !inputs.dry_run && !inputs.allow_non_ru_dry_run && hashFiles('proxy_state.db') != '' }}
         uses: actions/cache/save@v4
         with:
           path: proxy_state.db

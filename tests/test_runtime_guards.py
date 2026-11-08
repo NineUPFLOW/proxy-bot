@@ -159,14 +159,56 @@ class WorkflowSecretTests(unittest.TestCase):
         publish = workflow.split("      - name: Check and publish\n", 1)[1].split(
             "\n      - name:", 1
         )[0]
-        self.assertIn("if: ${{ !inputs.dry_run }}", publish)
+        self.assertIn(
+            "if: ${{ !inputs.dry_run && !inputs.allow_non_ru_dry_run }}", publish
+        )
         self.assertIn("secrets.BOT_TOKEN", publish)
         self.assertEqual(workflow.count("secrets."), publish.count("secrets."))
         dry_run = workflow.split("      - name: Dry run\n", 1)[1].split(
             "\n      - name:", 1
         )[0]
-        self.assertIn("if: ${{ inputs.dry_run }}", dry_run)
+        self.assertIn(
+            "if: ${{ inputs.dry_run && !inputs.allow_non_ru_dry_run }}", dry_run
+        )
         self.assertNotIn("secrets.", dry_run)
+
+    def test_non_ru_mode_is_opt_in_and_never_publishes(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
+        option = workflow.split("      allow_non_ru_dry_run:\n", 1)[1].split(
+            "  schedule:", 1
+        )[0]
+        self.assertIn("type: boolean", option)
+        self.assertIn("default: false", option)
+        rejected = workflow.split("      - name: Reject incompatible run options\n", 1)[
+            1
+        ].split("\n      - uses:", 1)[0]
+        self.assertIn(
+            "if: ${{ inputs.allow_non_ru_dry_run && !inputs.dry_run }}", rejected
+        )
+        self.assertIn("exit 1", rejected)
+        outside = workflow.split("      - name: Dry run outside Russia\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        self.assertIn(
+            "if: ${{ inputs.dry_run && inputs.allow_non_ru_dry_run }}", outside
+        )
+        self.assertIn("REQUIRE_RU_CHECK: '0'", outside)
+        self.assertIn("python -u bot.py --dry-run", outside)
+        self.assertNotIn("secrets.", outside)
+        publish = workflow.split("      - name: Check and publish\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        self.assertIn(
+            "if: ${{ !inputs.dry_run && !inputs.allow_non_ru_dry_run }}", publish
+        )
+        self.assertNotIn("REQUIRE_RU_CHECK: '0'", publish)
+        self.assertIn("REQUIRE_RU_CHECK: ${{ vars.REQUIRE_RU_CHECK || '1' }}", workflow)
+        restore = workflow.split("      - name: Restore state\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        save = workflow.split("      - name: Save state\n", 1)[1]
+        self.assertIn("!inputs.allow_non_ru_dry_run", restore)
+        self.assertIn("!inputs.allow_non_ru_dry_run", save)
 
 
 if __name__ == "__main__":
