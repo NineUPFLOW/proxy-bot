@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from html.parser import HTMLParser
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import bot
@@ -37,6 +38,28 @@ class PresentationTests(unittest.TestCase):
             "checked_at": "2026-11-06T17:00:00+00:00",
             "id": "a1b2c3d4e5f6",
         }
+
+    def test_readme_example_matches_generated_message_and_button_label(self):
+        class TelegramText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.parts = []
+
+            def handle_data(self, data):
+                self.parts.append(data)
+
+        readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### Пример текста публикации\n", 1)[1].split(
+            "\n## ", 1
+        )[0]
+        example = section.split("```text\n", 1)[1].split("\n```", 1)[0]
+        proxy = self.example()
+        parser = TelegramText()
+        parser.feed(formatter.format_message(proxy))
+        self.assertEqual(example, "".join(parser.parts))
+        button = formatter.build_keyboard(proxy).inline_keyboard[0][0]
+        self.assertIn(f"`{button.text}`", section)
+        self.assertNotIn(button.text, example)  # An inline button, not message text.
 
     def test_message_retains_key_facts_and_real_recheck(self):
         rendered = formatter.format_message(self.example())
