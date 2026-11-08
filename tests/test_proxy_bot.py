@@ -179,12 +179,39 @@ class WebHostTests(unittest.TestCase):
 
 
 class ScoreTests(unittest.TestCase):
-    def test_mtproto_beats_web_and_socks(self):
-        mt = checker.compute_score({"protocol": "MTPROTO", "ping": 100})
-        web = checker.compute_score({"protocol": "WEB", "ping": 100})
-        socks = checker.compute_score({"protocol": "SOCKS5", "ping": 100})
-        self.assertGreater(mt, web)
-        self.assertGreater(web, socks)
+    def test_unmeasured_protocol_port_and_secret_do_not_add_bonus(self):
+        measured = {"ping": 100, "check_successes": 3, "check_total": 3}
+        options = [
+            {
+                **measured,
+                "protocol": "MTPROTO",
+                "port": 443,
+                "secret": "ee" + "12" * 16 + b"example.com".hex(),
+            },
+            {**measured, "protocol": "WEB", "port": 443},
+            {**measured, "protocol": "SOCKS5", "port": 1080},
+        ]
+        self.assertEqual(len({checker.compute_score(proxy) for proxy in options}), 1)
+
+    def test_success_ratio_is_prioritized_over_latency(self):
+        consistent = {"ping": 2000, "check_successes": 3, "check_total": 3}
+        faster_but_less_consistent = {
+            "ping": 100,
+            "check_successes": 2,
+            "check_total": 3,
+        }
+        self.assertGreater(
+            checker.compute_score(consistent),
+            checker.compute_score(faster_but_less_consistent),
+        )
+
+    def test_bad_check_counts_do_not_crash(self):
+        self.assertIsInstance(
+            checker.compute_score(
+                {"ping": 100, "check_successes": "bad", "check_total": None}
+            ),
+            int,
+        )
 
     def test_lower_ping_scores_higher(self):
         fast = checker.compute_score({"protocol": "MTPROTO", "ping": 50})

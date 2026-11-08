@@ -147,20 +147,23 @@ async def geolocate(ip: str) -> dict:
 
 
 def compute_score(proxy: dict) -> int:
+    """Prefer the observed success ratio, then latency; no protocol bonuses.
+
+    A few recent checks are a weak sample, not a long-term reliability model.
+    The multiplier preserves the priority of a one-unit ratio difference over
+    the full bounded latency range.
+    """
     try:
         ping = max(0, int(proxy.get("ping", 99999)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         ping = 99999
-    proto = str(proxy.get("protocol", "")).upper()
-    score = {"MTPROTO": 10000, "WEB": 7000, "SOCKS5": 5000}.get(proto, 0)
-    if proto == "MTPROTO":
-        score += {"fake_tls": 1500, "dd": 500}.get(
-            secret_kind(str(proxy.get("secret", ""))), 0
-        )
-    if proxy.get("port") == 443:
-        score += 200  # A preference, not evidence of working around a block.
-    score += int(proxy.get("check_successes", 0)) * 100
-    return score - min(ping, 10000)
+    try:
+        successes = int(proxy.get("check_successes", 0))
+        total = int(proxy.get("check_total", 0))
+    except (TypeError, ValueError, OverflowError):
+        successes = total = 0
+    ratio = successes * 10000 // total if 0 <= successes <= total and total > 0 else 0
+    return ratio * 10001 - min(ping, 10000)
 
 
 def enrich(

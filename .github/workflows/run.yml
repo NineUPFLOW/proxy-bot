@@ -28,13 +28,11 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       REQUIRE_RU_CHECK: ${{ vars.REQUIRE_RU_CHECK || '1' }}
       SOURCES_FILE: ${{ vars.SOURCES_FILE || 'sources.json' }}
-      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      CHAT_ID: ${{ secrets.CHAT_ID }}
-      TOPIC_ID: ${{ secrets.TOPIC_ID }}
-      BOT_PROXY_URL: ${{ secrets.BOT_PROXY_URL }}
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -51,15 +49,19 @@ jobs:
           key: proxy-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             proxy-state-${{ github.ref_name }}-
+      # Scheduled runs have no workflow_dispatch inputs and still publish.
+      # Manual dispatch defaults to dry-run unless the user unchecks it.
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        run: python -u bot.py --dry-run
       - name: Check and publish
-        # Scheduled runs have no workflow_dispatch inputs and still publish.
-        # Manual dispatch defaults to dry-run unless the user unchecks it.
-        run: |
-          if [ '${{ inputs.dry_run }}' = 'true' ]; then
-            python -u bot.py --dry-run
-          else
-            python -u bot.py
-          fi
+        if: ${{ !inputs.dry_run }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TOPIC_ID: ${{ secrets.TOPIC_ID }}
+          BOT_PROXY_URL: ${{ secrets.BOT_PROXY_URL }}
+        run: python -u bot.py
       - name: Save state
         if: ${{ always() && !inputs.dry_run && hashFiles('proxy_state.db') != '' }}
         uses: actions/cache/save@v4

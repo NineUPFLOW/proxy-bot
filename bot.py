@@ -20,6 +20,7 @@ import state
 from checker import process_proxy, recheck_proxy
 from formatter import build_keyboard, format_message
 from network import detect_egress_country
+from selection import select as select_balanced
 from sources import fetch_all_proxies
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -205,58 +206,17 @@ async def check_group(
     return working
 
 
-def _sort_key(proxy: dict) -> tuple[int, int]:
-    try:
-        return -int(proxy.get("score", 0)), int(proxy.get("ping", 99999))
-    except (TypeError, ValueError):
-        return 0, 99999
-
-
 def select_proxies(
     working: list[dict], *, already_selected: list[dict] | None = None
 ) -> list[dict]:
-    """Fill protocol targets first, accounting for already confirmed proxies."""
-    previous = already_selected or []
-    pools: dict[str, list[dict]] = {protocol: [] for protocol in TARGETS}
-    for proxy in working:
-        protocol = str(proxy.get("protocol", "")).upper()
-        if protocol in pools:
-            pools[protocol].append(proxy)
-    for pool in pools.values():
-        pool.sort(key=_sort_key)
-    selected: list[dict] = []
-    used = {state.proxy_identity(proxy) for proxy in previous}
-    ips: Counter = Counter(
-        str(proxy.get("resolved_ip") or proxy.get("ip", "")) for proxy in previous
+    """Fill protocol targets while respecting confirmed candidates and IPs."""
+    return select_balanced(
+        working,
+        previous=already_selected or [],
+        targets=TARGETS,
+        max_per_ip=MAX_PER_IP,
+        limit=PUBLISH_COUNT,
     )
-    protocol_counts: Counter = Counter(
-        str(proxy.get("protocol", "")).upper() for proxy in previous
-    )
-
-    def add(proxy: dict) -> bool:
-        identity = state.proxy_identity(proxy)
-        ip = str(proxy.get("resolved_ip") or proxy.get("ip", ""))
-        if identity in used or (MAX_PER_IP and ips[ip] >= MAX_PER_IP):
-            return False
-        if len(previous) + len(selected) >= PUBLISH_COUNT:
-            return False
-        selected.append(proxy)
-        used.add(identity)
-        ips[ip] += 1
-        return True
-
-    for protocol, target in TARGETS.items():
-        count = protocol_counts[protocol]
-        for proxy in pools[protocol]:
-            if count >= target or len(previous) + len(selected) >= PUBLISH_COUNT:
-                break
-            if add(proxy):
-                count += 1
-    for proxy in sorted(working, key=_sort_key):
-        if len(previous) + len(selected) >= PUBLISH_COUNT:
-            break
-        add(proxy)
-    return selected
 
 
 async def run(
@@ -328,15 +288,18 @@ async def _run(
     working = dedup(working)
     final = select_proxies(working)
 
-    # A VPN or route may have changed while the batch was running, including
-    # when every check failed. Do not persist potentially misleading failures
-    # before checking the egress again, or good proxies can be put on cooldown.
+    # These are point-in-time observations, not continuous route monitoring.
+    # A route change or failed lookup must not be reported as a stable RU check.
     changed = False
-    if any(batch for batch, _ in checked_batches):
-        current_location = await detect_egress_country()
-        current_country = str(current_location.get("country_code", "")).upper()
-        changed = current_country != country or (
-            location.get("ip") and current_location.get("ip") != location["ip"]
+
+    async def verify_egress() -> None:
+        nonlocal changed, country
+        if changed:
+            return
+        current = await detect_egress_country()
+        current_country = str(current.get("country_code", "")).upper()
+        changed = current_country != country or bool(
+            location.get("ip") and current.get("ip") != location["ip"]
         )
         if changed:
             if REQUIRE_RU_CHECK:
@@ -344,9 +307,14 @@ async def _run(
                     "Исходящий IP или страна проверки изменились; публикация остановлена."
                 )
             logger.warning(
-                "Egress changed during checks; country and failure statistics discarded"
+                "Egress changed during checks; country and unverified failures discarded"
             )
             country = ""
+
+    # Do not write potentially misleading failures before the batch egress
+    # observation, or working proxies could be put on cooldown.
+    if any(batch for batch, _ in checked_batches):
+        await verify_egress()
     if not dry_run and not changed:
         for batch, results in checked_batches:
             _record_check_results(batch, results)
@@ -365,6 +333,9 @@ async def _run(
     reserves = [p for p in working if state.proxy_identity(p) not in first_ids]
     pending = deque(final)
     confirmed: list[dict] = []
+    # Defer failed final checks until an egress observation confirms that they
+    # were made on the same route as the main batch.
+    final_failures: list[dict] = []
     published_ips: Counter = Counter()
     attempted = 0
     while len(confirmed) < PUBLISH_COUNT:
@@ -385,9 +356,16 @@ async def _run(
         fresh = await recheck_proxy(proxy)
         if not fresh:
             logger.info("Skipped stale proxy %s", proxy.get("id", "?"))
-            if not dry_run and not changed:
-                state.mark_seen(proxy)
+            if not changed:
+                final_failures.append(proxy)
             continue
+        # The previous egress check happened before this final protocol check.
+        # Check again before labelling or publishing the result.
+        await verify_egress()
+        if final_failures:
+            if not dry_run and not changed:
+                state.mark_seen_many(final_failures)
+            final_failures.clear()
         fresh["check_country"] = country
         if dry_run:
             logger.info(
@@ -410,6 +388,10 @@ async def _run(
         published_ips[candidate_ip] += 1
         if not dry_run and SEND_DELAY:
             await asyncio.sleep(SEND_DELAY)
+    if final_failures:
+        await verify_egress()
+        if not dry_run and not changed:
+            state.mark_seen_many(final_failures)
     logger.info(
         "%s %d/%d proxies (rechecked: %d)",
         "Would publish" if dry_run else "Published",
