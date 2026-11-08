@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -114,6 +115,36 @@ class EgressAtPublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["check_country"], "")
 
+    async def test_explicit_non_strict_publication_keeps_actual_country_and_limit(self):
+        first = self.candidate()
+        second = {**first, "ip": "another.example"}
+        first_checked = {**first, "resolved_ip": "8.8.4.4", "score": 100, "ping": 100}
+        second_checked = {**second, "resolved_ip": "1.0.0.1", "score": 90, "ping": 110}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(state, "DB_PATH", Path(tmp) / "state.db"),
+            patch.object(bot, "REQUIRE_RU_CHECK", False),
+            patch.object(bot, "PUBLISH_COUNT", 1),
+            patch.object(bot, "SEND_DELAY", 0),
+            patch.object(bot, "detect_egress_country", AsyncMock(return_value=US)),
+            patch.object(
+                bot, "fetch_all_proxies", AsyncMock(return_value=[first, second])
+            ),
+            patch.object(
+                bot,
+                "process_proxy",
+                AsyncMock(side_effect=[first_checked, second_checked]),
+            ),
+            patch.object(bot, "recheck_proxy", AsyncMock(side_effect=lambda p: p)),
+            patch.object(bot, "send_message", AsyncMock(return_value=True)) as send,
+        ):
+            published = await bot.run(Mock(), 123)
+            self.assertEqual(len(published), 1)
+            self.assertEqual(published[0]["check_country"], "US")
+            self.assertEqual(send.await_count, 1)
+            self.assertIn("</b> US (оценка по внешнему IP)", send.await_args.args[3])
+            self.assertEqual(state.count_published(), 1)
+
     async def test_failed_final_check_is_not_persisted_if_egress_changed(self):
         candidate = self.candidate()
         checked = {**candidate, "resolved_ip": "8.8.4.4", "score": 100, "ping": 100}
@@ -175,16 +206,15 @@ class WorkflowSecretTests(unittest.TestCase):
     def test_non_ru_mode_is_opt_in_and_never_publishes(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
         option = workflow.split("      allow_non_ru_dry_run:\n", 1)[1].split(
-            "  schedule:", 1
+            "      allow_non_ru_publish:\n", 1
         )[0]
         self.assertIn("type: boolean", option)
         self.assertIn("default: false", option)
         rejected = workflow.split("      - name: Reject incompatible run options\n", 1)[
             1
-        ].split("\n      - uses:", 1)[0]
-        self.assertIn(
-            "if: ${{ inputs.allow_non_ru_dry_run && !inputs.dry_run }}", rejected
-        )
+        ].split("\n      - name:", 1)[0]
+        self.assertIn("(inputs.allow_non_ru_dry_run && !inputs.dry_run)", rejected)
+        self.assertIn("(inputs.allow_non_ru_publish && inputs.dry_run)", rejected)
         self.assertIn("exit 1", rejected)
         outside = workflow.split("      - name: Dry run outside Russia\n", 1)[1].split(
             "\n      - name:", 1
@@ -201,7 +231,11 @@ class WorkflowSecretTests(unittest.TestCase):
         self.assertIn(
             "if: ${{ !inputs.dry_run && !inputs.allow_non_ru_dry_run }}", publish
         )
-        self.assertNotIn("REQUIRE_RU_CHECK: '0'", publish)
+        self.assertIn(
+            "REQUIRE_RU_CHECK: ${{ inputs.allow_non_ru_publish && '0' || "
+            "vars.REQUIRE_RU_CHECK || '1' }}",
+            publish,
+        )
         self.assertIn("REQUIRE_RU_CHECK: ${{ vars.REQUIRE_RU_CHECK || '1' }}", workflow)
         restore = workflow.split("      - name: Restore state\n", 1)[1].split(
             "\n      - name:", 1
@@ -209,6 +243,70 @@ class WorkflowSecretTests(unittest.TestCase):
         save = workflow.split("      - name: Save state\n", 1)[1]
         self.assertIn("!inputs.allow_non_ru_dry_run", restore)
         self.assertIn("!inputs.allow_non_ru_dry_run", save)
+
+    def test_non_ru_publication_is_separately_opt_in(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
+        option = workflow.split("      allow_non_ru_publish:\n", 1)[1].split(
+            "      publish_count:\n", 1
+        )[0]
+        self.assertIn("type: boolean", option)
+        self.assertIn("default: false", option)
+        publish = workflow.split("      - name: Check and publish\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        self.assertIn("inputs.allow_non_ru_publish && '0'", publish)
+        self.assertIn("!inputs.dry_run && !inputs.allow_non_ru_dry_run", publish)
+        self.assertIn("проверка из", workflow.lower())
+        self.assertIn("доступность прокси из РФ не подтверждена", publish)
+
+    def test_publish_count_is_bounded_and_validated_before_any_secret_use(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
+        option = workflow.split("      publish_count:\n", 1)[1].split("  schedule:", 1)[
+            0
+        ]
+        self.assertIn("type: choice", option)
+        for value in ("1", "3", "9"):
+            self.assertIn(f"- '{value}'", option)
+        self.assertIn("default: '9'", option)
+        self.assertIn("PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}", workflow)
+        validate = workflow.split("      - name: Validate publication limit\n", 1)[
+            1
+        ].split("\n      - uses:", 1)[0]
+        self.assertIn('case "$PUBLISH_COUNT" in', validate)
+        self.assertIn("1|3|9)", validate)
+        self.assertIn("exit 1", validate)
+        self.assertLess(
+            workflow.index("- name: Validate publication limit"),
+            workflow.index("secrets.BOT_TOKEN"),
+        )
+
+    def test_shared_concurrency_group_serializes_old_and_new_workflow(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
+        group = workflow.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertIn("group: proxy-bot-run\n", group)
+        self.assertIn("cancel-in-progress: false", group)
+        self.assertNotIn("github.ref", group)
+
+    def test_readme_cron_payload_matches_the_workflow(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/run.yml").read_text()
+        section = (
+            (root / "README.md")
+            .read_text()
+            .split("### Cron-job.org: публикация через GitHub Actions", 1)[1]
+            .split("\n### ", 1)[0]
+        )
+        payload = json.loads(section.split("```json\n", 1)[1].split("\n   ```", 1)[0])
+        self.assertEqual(payload["ref"], "improve-code-quality")
+        self.assertEqual(payload["inputs"]["dry_run"], "false")
+        self.assertEqual(payload["inputs"]["allow_non_ru_dry_run"], "false")
+        self.assertEqual(payload["inputs"]["allow_non_ru_publish"], "true")
+        self.assertEqual(payload["inputs"]["publish_count"], "9")
+        for name in payload["inputs"]:
+            self.assertIn(f"      {name}:\n", workflow)
+        self.assertIn("/actions/workflows/run.yml/dispatches", section)
+        self.assertIn("204", section)
+        self.assertIn("Test Run запускает реальную публикацию", section)
 
 
 if __name__ == "__main__":
