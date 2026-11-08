@@ -46,7 +46,6 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       REQUIRE_RU_CHECK: ${{ vars.REQUIRE_RU_CHECK || '1' }}
       SOURCES_FILE: ${{ vars.SOURCES_FILE || 'sources.json' }}
-      PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}
 
     steps:
       - name: Reject incompatible run options
@@ -55,6 +54,8 @@ jobs:
           echo "::error::allow_non_ru_dry_run требует dry_run; allow_non_ru_publish требует отключить dry_run."
           exit 1
       - name: Validate publication limit
+        env:
+          PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}
         run: |
           case "$PUBLISH_COUNT" in
             1|3|9) ;;
@@ -83,11 +84,14 @@ jobs:
       # A non-RU diagnostic must never share a step with real publication.
       - name: Dry run
         if: ${{ inputs.dry_run && !inputs.allow_non_ru_dry_run }}
+        env:
+          PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}
         run: python -u bot.py --dry-run
       - name: Dry run outside Russia
         if: ${{ inputs.dry_run && inputs.allow_non_ru_dry_run }}
         env:
           REQUIRE_RU_CHECK: '0'
+          PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}
         run: |
           echo "::warning::Только пробная проверка из этой сети; публикации нет, работа из РФ не подтверждается."
           python -u bot.py --dry-run
@@ -97,6 +101,7 @@ jobs:
           # Explicit opt-in applies only to this publication step. The default
           # country guard and non-RU dry-run remain independent.
           REQUIRE_RU_CHECK: ${{ inputs.allow_non_ru_publish && '0' || vars.REQUIRE_RU_CHECK || '1' }}
+          PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}
           ALLOW_NON_RU_PUBLISH: ${{ inputs.allow_non_ru_publish }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}

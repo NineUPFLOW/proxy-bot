@@ -184,6 +184,8 @@ class WorkflowSecretTests(unittest.TestCase):
         workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
         job_env = workflow.split("    env:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertNotIn("secrets.", job_env)
+        # A caller's publication limit must not alter unit-test assumptions.
+        self.assertNotIn("PUBLISH_COUNT:", job_env)
 
     def test_secrets_are_limited_to_non_dry_run_publish_step(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/run.yml").read_text()
@@ -268,7 +270,17 @@ class WorkflowSecretTests(unittest.TestCase):
         for value in ("1", "3", "9"):
             self.assertIn(f"- '{value}'", option)
         self.assertIn("default: '9'", option)
-        self.assertIn("PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}", workflow)
+        limit = "PUBLISH_COUNT: ${{ inputs.publish_count || '9' }}"
+        for name in (
+            "Validate publication limit",
+            "Dry run",
+            "Dry run outside Russia",
+            "Check and publish",
+        ):
+            step = workflow.split(f"      - name: {name}\n", 1)[1].split(
+                "\n      - name:", 1
+            )[0]
+            self.assertIn(limit, step)
         validate = workflow.split("      - name: Validate publication limit\n", 1)[
             1
         ].split("\n      - uses:", 1)[0]

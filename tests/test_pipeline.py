@@ -756,7 +756,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         }
         p2 = {**p1, "ip": "two.example", "score": 99}
         p3 = {**p1, "ip": "three.example", "resolved_ip": "1.1.1.1", "score": 98}
-        with patch.object(bot, "MAX_PER_IP", 1):
+        with (
+            patch.object(bot, "MAX_PER_IP", 1),
+            patch.object(bot, "PUBLISH_COUNT", 9),
+        ):
             selected = bot.select_proxies([p1, p2, p3])
         self.assertEqual(len(selected), 2)
         self.assertEqual({p["resolved_ip"] for p in selected}, {"8.8.8.8", "1.1.1.1"})
